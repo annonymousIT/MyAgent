@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# 認証情報（絶対にコミットしない）
+.env
+credentials.json
+token.json
+*.key
+
+# OS
+Thumbs.db
+.DS_Store
