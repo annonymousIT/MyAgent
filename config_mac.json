@@ -1,0 +1,26 @@
+{
+  "sites": {
+    "claude": "https://claude.ai",
+    "課題": "https://(manabaのURLに書き換える)",
+    "manaba": "https://(manabaのURLに書き換える)",
+    "動画": "https://youtube.com",
+    "youtube": "https://youtube.com",
+    "github": "https://github.com"
+  },
+  "apps": {
+    "ディスコード": "Discord",
+    "discord": "Discord",
+    "電話": "Discord",
+    "メモ": "Notes",
+    "ターミナル": "Terminal"
+  },
+  "system": {
+    "音量下げる": "osascript -e 'set volume output volume 25'",
+    "音量上げる": "osascript -e 'set volume output volume 70'",
+    "モニタ消す": "pmset displaysleepnow"
+  },
+  "dangerous_system": {
+    "寝る": "osascript -e 'tell application \"System Events\" to sleep'",
+    "再起動": "osascript -e 'tell application \"System Events\" to restart'"
+  }
+}

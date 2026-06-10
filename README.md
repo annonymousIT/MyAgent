@@ -37,14 +37,23 @@
 
 | ツール | 役割 |
 |---|---|
-| `open_site(name)` | `config.json` の名前→URL表からURLを引いてブラウザで開く |
-| `launch_app(name)` | 名前→アプリパス表からexeパスを引いて起動 |
+| `open_site(name)` | 名前→URL表からURLを引いてブラウザで開く |
+| `launch_app(name)` | 名前→アプリ表から引いて起動（Win=exeパス / Mac=`open -a`） |
 | `run_system(name)` | 名前→システムコマンド表（音量・モニタ等）を実行。危険操作は確認を挟む |
 | `read_calendar(date)` | Googleカレンダー（全カレンダー）から予定取得 ※Step4 |
 | `read_todo()` | Google ToDo（Tasks API）から締切付きタスク取得 ※Step4 |
 | `come_home()` | 「ただいま」で発火。明日の予定＋TODOをまとめて報告 ※Step4 |
 
-拡張は `config.json` の表に1行足すだけ。
+拡張は設定表に1行足すだけ。
+
+### クロスプラットフォーム設計
+
+OS差分は**設定ファイルに隔離**し、コード本体は共通に保つ。
+
+- `config_win.json` … Windows用（exeパス / `nircmd` 等）
+- `config_mac.json` … Mac用（アプリ名 / `osascript`・`pmset` 等）
+- `tools.py` が `platform.system()` を見て自動で読み分ける（Mac=Darwin→mac、それ以外→win）
+- 発声 `speak.py` も Mac=`say` / Windows=SAPI を自動切替（口のインターフェースを固定し、将来VOICEVOXに無変更で差し替え可能）
 
 ---
 
@@ -62,14 +71,21 @@ Step5  記憶の要約管理 ＋ 文脈での動的画面振り分け
 
 ## セットアップ（Step1）
 
+**Windows（PowerShell）:**
 ```powershell
 pip install -r requirements.txt
-# APIキーを環境変数にセット（PowerShell）
 $env:ANTHROPIC_API_KEY = "sk-ant-..."
 python agent.py
 ```
 
-起動したら話しかける：
+**Mac（zsh/bash）:**
+```bash
+pip3 install -r requirements.txt
+export ANTHROPIC_API_KEY="sk-ant-..."
+python3 agent.py
+```
+
+起動すると返事がテキスト＋音声で返る（`音声オフ` / `音声オン` で切替）。話しかける：
 
 ```
 > 課題見よ
@@ -84,7 +100,7 @@ python agent.py
 ### 自分で埋める箇所
 
 - `ANTHROPIC_API_KEY`（環境変数）
-- `config.json` の各URL（manaba 等）とアプリの実パス（Valorant / Discord 等）
+- 使うOSの設定ファイル（`config_win.json` または `config_mac.json`）の各URL（manaba 等）とアプリ（Win=実パス / Mac=アプリ名）
 
 ---
 
@@ -106,5 +122,5 @@ python agent.py
 
 - **脳**：Claude API（Haiku＝安く十分）／月コスト目安 100〜200円
 - **耳**：Whisper（ローカル無料）＋ Focusrite Scarlett マイク ※Step2
-- **口**：VOICEVOX（無料・世話焼き系の声）※Step3
+- **口**：いまはOS標準音声（Mac=`say` / Win=SAPI）→ Step3でVOICEVOX（世話焼き系の声）に差し替え
 - **予定**：Googleカレンダー＋Google ToDo（Tasks API）※Step4

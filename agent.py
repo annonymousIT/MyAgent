@@ -11,9 +11,13 @@ from pathlib import Path
 import anthropic
 
 import tools
+import speak as speak_mod
 
 MODEL = "claude-haiku-4-5"
 PERSONA_PATH = Path(__file__).parent / "persona.txt"
+
+# 返事を音声でも読み上げるか（実行中に「音声オフ」「音声オン」で切替可）
+VOICE_ENABLED = True
 
 
 def load_persona() -> str:
@@ -28,8 +32,9 @@ def main():
 
     client = anthropic.Anthropic(api_key=api_key)
     persona = load_persona()
+    voice_on = VOICE_ENABLED
 
-    print("🤖 起動しました。話しかけてください（終了は exit / quit）。")
+    print("🤖 起動しました。話しかけてください（終了は exit / quit、音声切替は 音声オフ / 音声オン）。")
     while True:
         try:
             user_input = input("\n> ").strip()
@@ -41,9 +46,15 @@ def main():
         if user_input.lower() in ("exit", "quit", "おやすみ", "ばいばい"):
             print("🤖 おやすみなさいませ。ゆっくり休んでくださいね^^;")
             break
+        if user_input in ("音声オフ", "音声オン"):
+            voice_on = user_input == "音声オン"
+            print(f"🤖 音声を{'オン' if voice_on else 'オフ'}にしました。")
+            continue
 
         reply = handle(client, persona, user_input)
         print(f"🤖 {reply}")
+        if voice_on:
+            speak_mod.speak(reply)
 
 
 def handle(client, persona: str, user_input: str) -> str:
