@@ -131,9 +131,30 @@ def _record_utterance(stream: "sd.InputStream") -> "np.ndarray | None":
     return np.concatenate(voiced)
 
 
-def _transcribe(model, audio_i16: "np.ndarray") -> str:
+def _build_vocab_hint() -> str:
+    """Whisper の initial_prompt 用の語彙ヒント。想定する命令語・アプリ名を先に教えて誤認識を減らす
+    （例「メモ」が「イメ無」になるのを抑える）。長すぎると逆効果なので要点だけ。"""
+    words = ["やっほーエージェント", "メモ", "音量", "画面", "天気", "予定", "スクショ", "再生",
+             "次の曲", "ロック", "開いて", "閉じて", "起動して", "ただいま", "おはよう", "おやすみ", "終了"]
+    try:
+        import tools
+        for n, v in tools.load_config().get("apps", {}).items():
+            words.append(n)
+            if isinstance(v, dict) and v.get("aliases"):
+                words.append(v["aliases"][0])
+    except Exception:
+        pass
+    seen: list[str] = []
+    for w in words:
+        if w and w not in seen:
+            seen.append(w)
+    return "、".join(seen[:45])
+
+
+def _transcribe(model, audio_i16: "np.ndarray", hint: str = "") -> str:
     audio = audio_i16.astype(np.float32) / 32768.0
-    segs, _ = model.transcribe(audio, language="ja", beam_size=1)
+    # beam_size=5 で精度優先、initial_prompt で語彙を寄せる（短い命令の取り違えを減らす）。
+    segs, _ = model.transcribe(audio, language="ja", beam_size=5, initial_prompt=hint or None)
     return "".join(s.text for s in segs).strip()
 
 
@@ -151,6 +172,7 @@ def main() -> None:
     list(model.transcribe(np.zeros(8000, dtype=np.float32), language="ja", beam_size=1)[0])
 
     tools.SHOW_WEATHER_PAGE = False  # 音声モード: 天気は読み上げで届ける（タブを開かない）
+    vocab_hint = _build_vocab_hint()  # Whisper の語彙ヒント（誤認識を減らす）
 
     # 相槌を事前合成（VOICEVOX未起動なら空＝相槌なしで動く）。現在の声設定で合成する。
     _sp, _pi, _spd = speak_mod._voice_cfg()
@@ -163,8 +185,8 @@ def main() -> None:
     pending_front = ""       # 一時タブを開く前に前面だったアプリ（閉じた後ここへ戻す）
     awake_until = 0.0        # この時刻まではウェイクワード無しで連続会話できる
 
-    print(f"🎤 音声入力モード。「{WAKE_PHRASE}」と呼びかけてから話してください"
-          f"（起動後{int(AWAKE_WINDOW)}秒は呼びかけ不要 / 「終了」で停止 / Ctrl+C でも可）", flush=True)
+    print(f"🎤 音声入力モード。毎回「{WAKE_PHRASE}」と呼びかけてから話してください"
+          "（聞き返された時だけ、そのまま答えてOK / 「終了」で停止 / Ctrl+C でも可）", flush=True)
     speak_mod.speak(f"音声モードです。{WAKE_PHRASE}、と呼んでくださいね。", block=True)
 
     # マイクは開きっぱなしで使い回す（毎回 open すると数百ms ロスし発話の頭も欠ける・#34）
@@ -186,7 +208,7 @@ def main() -> None:
             audio = _record_utterance(mic)
             if audio is None:
                 continue
-            text = _transcribe(model, audio)
+            text = _transcribe(model, audio, vocab_hint)
             if not text or _is_noise(text):
                 if text:
                     print(f"🔉 聞こえた（雑音扱いで無視）: 「{text}」", flush=True)
@@ -296,7 +318,12 @@ def main() -> None:
             c = result.get("cost") or {}
             if c:
                 print(f"  (¥{c.get('turn', 0)} / 今月¥{c.get('month', 0)}/{c.get('budget', 300)})", flush=True)
-            awake_until = time.time() + AWAKE_WINDOW       # 対話のたびに起動ウィンドウを延長
+            # 起動ウィンドウは「エージェントが質問を返した時だけ」延長する（＝続きが期待される文脈のみ
+            # ウェイクワード無しで答えられる）。普通に実行して完了したら sleep に戻る＝毎回呼びかけが要る。
+            if reply.rstrip().endswith(("？", "?")):
+                awake_until = time.time() + AWAKE_WINDOW
+            else:
+                awake_until = 0.0
 
             eph = result.get("ephemeral") or []
             if eph:  # このターンで開いた一時タブは次の発話の頭で閉じて画面を戻す
