@@ -93,6 +93,7 @@ def build_system_prompt(persona: str) -> str:
 
 
 MAX_HISTORY_MESSAGES = 10  # 直近5往復ぶんを保持（ADR-3：直近Nそのまま。古いものの要約は将来）
+MAX_TOOL_ROUNDS = 5  # 「起動→配置」など複数ステップを許す。暴走防止に上限を設ける
 
 
 def run_turn(client, persona: str, user_input: str, dry_run: bool = False, history=None) -> dict:
@@ -120,38 +121,42 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
         return {"actions": actions, "reply": reply, "history": new_history,
                 "ephemeral": tools.pop_ephemeral_opened()}
 
-    response = client.messages.create(
-        model=MODEL, max_tokens=300, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
-    )
+    # ツールが尽きる（テキストで返してくる）まで回す。これにより「起動→配置」のような
+    # 複数ステップが1ターン内で完結する（旧実装は1ラウンドで打ち切り、2手目のtool_useを捨てていた）。
+    response = None
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = client.messages.create(
+            model=MODEL, max_tokens=400, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
+        )
+        if response.stop_reason != "tool_use":
+            return _finish(_text_of(response))
 
-    if response.stop_reason != "tool_use":
-        return _finish(_text_of(response))
+        messages.append({"role": "assistant", "content": response.content})
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                label = f"{block.name}({block.input})"
+                if dry_run:
+                    result = "（ドライラン：実際には実行していません）"
+                    actions.append({"kind": "dry", "label": label, "result": result,
+                                    "tool": block.name, "input": block.input})
+                else:
+                    result = tools.run_tool(block.name, block.input)
+                    actions.append({"kind": "run", "label": label, "result": result,
+                                    "tool": block.name, "input": block.input})
+                tool_results.append(
+                    {"type": "tool_result", "tool_use_id": block.id, "content": result}
+                )
 
-    messages.append({"role": "assistant", "content": response.content})
-    tool_results = []
-    for block in response.content:
-        if block.type == "tool_use":
-            label = f"{block.name}({block.input})"
-            if dry_run:
-                result = "（ドライラン：実際には実行していません）"
-                actions.append({"kind": "dry", "label": label, "result": result,
-                                "tool": block.name, "input": block.input})
-            else:
-                result = tools.run_tool(block.name, block.input)
-                actions.append({"kind": "run", "label": label, "result": result,
-                                "tool": block.name, "input": block.input})
-            tool_results.append(
-                {"type": "tool_result", "tool_use_id": block.id, "content": result}
-            )
+        # stop_reason が tool_use でも実 tool_use ブロックが無い稀ケース。空contentで
+        # フォロー呼び出しすると API 400 になるため、その応答テキストで返す。
+        if not tool_results:
+            return _finish(_text_of(response))
+        messages.append({"role": "user", "content": tool_results})
 
-    # stop_reason が tool_use でも実 tool_use ブロックが無い稀ケース。空contentで
-    # フォロー呼び出しすると API 400 になるため、最初の応答テキストで返す。
-    if not tool_results:
-        return _finish(_text_of(response))
-    messages.append({"role": "user", "content": tool_results})
-
+    # 上限まで回しても止まらなかった：最後にツール無しで締めの一言だけ書かせる
     final = client.messages.create(
-        model=MODEL, max_tokens=300, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
+        model=MODEL, max_tokens=300, system=system_prompt, messages=messages
     )
     reply = _text_of(final)
     if reply == "（…）" and actions:  # 実行後にモデルが何も言わなかった時の保険：ツール結果を返答に使う
