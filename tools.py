@@ -12,11 +12,14 @@ config.user.json の "overrides" に {"<name>": "site"} を置くと、その na
 
 from __future__ import annotations
 
+import html
 import json
 import platform
+import re
 import subprocess
 import unicodedata
 import urllib.parse
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -249,6 +252,53 @@ def open_url(url: str) -> str:
     return f"{target} を開きました。"
 
 
+def _http_get(url: str, timeout: int = 12, ua: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)") -> str:
+    """URLを取得して本文文字列を返す。日本語等の非ASCIIはエンコードしてから投げる。
+    ua=curl 系にすると wttr.in 等は HTML でなくプレーンテキストを返す。"""
+    safe = urllib.parse.quote(url, safe="%/:=&?#+@!$,;'()*~[]")
+    req = urllib.request.Request(safe, headers={"User-Agent": ua})
+    return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore")
+
+
+def fetch_page(url: str) -> str:
+    """URLの本文を取得しプレーンテキストで返す（B：内容を読んで“伝える”ための材料・ADR-0021）。
+
+    返したテキストをモデルが要約して伝える。捏造防止：実際に取得した内容だけを根拠にする。
+    検索結果ページ（google等）はボット遮断で取れないことが多い。具体的な記事/サイトのURL向き。
+    """
+    if not url or not url.strip():
+        return "URLが空です。"
+    target = url.strip()
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+    try:
+        raw = _http_get(target)
+    except Exception as e:
+        return f"取得に失敗しました（{type(e).__name__}）。"
+    text = re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", raw)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", html.unescape(text)).strip()
+    return text[:3000] if text else "（本文が取得できませんでした）"
+
+
+def get_weather(location: str) -> str:
+    """指定地のいまの天気を取得して伝える（B/ADR-0021・ソース=wttr.in、キー不要・実データ）。
+
+    返り値の実データをモデルが日本語で要約して伝える（捏造防止）。
+    “見せる”用に天気ページもブラウザで開く（ephemeral：次ターンで自動クローズ）。
+    """
+    loc = (location or "").strip() or "現在地"
+    enc = urllib.parse.quote(loc)
+    try:
+        data = _http_get(f"https://wttr.in/{enc}?format=%l:+%c+%t+%w+%h+%p&m", ua="curl/8.0").strip()
+    except Exception as e:
+        return f"{loc} の天気が取得できませんでした（{type(e).__name__}）。"
+    page = f"https://wttr.in/{enc}"
+    webbrowser.open(page)            # 見せる
+    _EPHEMERAL_OPENED.append(page)   # 用が済んだら次ターンで閉じる
+    return f"天気（実データ）: {data}"
+
+
 def close_browser_tabs(urls: "list[str]") -> int:
     """指定URLに一致するブラウザタブを閉じる（ephemeralの後片付け・Mac/Chrome）。
 
@@ -343,6 +393,24 @@ TOOL_DEFS = [
             "required": ["url"],
         },
     },
+    {
+        "name": "get_weather",
+        "description": "指定した地名の『いまの天気』を実データで取得して伝える。天気を聞かれたら必ずこれを使う（想像で答えない）。引数 location は地名（例: 茨木, Tokyo）。取得した実データを日本語で要約して伝えること。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"location": {"type": "string", "description": "地名"}},
+            "required": ["location"],
+        },
+    },
+    {
+        "name": "fetch_page",
+        "description": "指定URLの本文を取得して返す。具体的な記事/サイトの内容を読んで要約・回答したいときに使う（戻り値の実データだけを根拠に要約する＝捏造防止）。検索結果ページ(google等)はボット遮断で取れないことが多い。引数 url は取得するURL。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "取得するURL"}},
+            "required": ["url"],
+        },
+    },
 ]
 
 # ツール名 → 実関数
@@ -352,6 +420,8 @@ DISPATCH = {
     "run_system": run_system,
     "web_search": web_search,
     "open_url": open_url,
+    "get_weather": get_weather,
+    "fetch_page": fetch_page,
 }
 
 
