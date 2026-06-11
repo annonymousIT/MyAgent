@@ -18,6 +18,7 @@ import platform
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -447,7 +448,14 @@ def manage_window(action: str, app: str = "") -> str:
         f'  set size of window 1 to {{{w}, {h}}}\n'
         f'end tell'
     )
-    ok, err = _osa(script)
+    # 起動直後はウィンドウがまだ出ておらず失敗することがある（launch→arrangeの競合）。
+    # アクセシビリティ拒否でない限り、少し待って数回リトライする。
+    ok, err = False, ""
+    for attempt in range(4):
+        ok, err = _osa(script)
+        if ok or _ax_denied(err):
+            break
+        time.sleep(0.5)
     if ok:
         label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
         return f"{proc} のウィンドウを{label}に配置しました。"
