@@ -1,22 +1,31 @@
-"""デスクトップに浮く、ホワンホワン脈打つ丸いエージェント（presence orb）。
+"""デスクトップに浮く、水の波紋のように脈打つ丸いエージェント（presence orb）＝司令塔。
 
-「私、ここにいますよ」を示すデスクトップ常駐ギミック。
-- ふわっと拡縮＋明滅して脈打つ（ホワンホワン）
-- ドラッグで好きな位置へ移動
-- クリックで設定画面（音声ON/OFF・声の種類・ピッチ/速度・声テスト・今月の予算）
+PowerShell を開かずに、これ一つで音声エージェントを操作する（ADR-0036 / 0038 / #35）。
+- 左クリック: 聴取（「やっほーエージェント」待ち受け）の ON/OFF。ON 中は orb が明るく速く脈打つ
+- 右クリック: メニュー（設定 / 終了）
+- ドラッグ: 移動
+- 起動時に VOICEVOX が落ちていれば裏で起動する（best-effort）
 
-tkinter のみ（Python標準同梱・追加依存なし）。Windows は透明背景で丸く浮く。
-起動: python overlay.py
+聴取 ON の間、voice.py を小さなコンソール付きの子プロセスで起動（認識テキスト/コストが見える）。
+tkinter のみ（追加依存なし）。スタートアップ登録すればログイン時に自動常駐（聴取は押すまで始まらない）。
+起動: pythonw overlay.py
 """
 
 from __future__ import annotations
 
+import os
 import platform
+import subprocess
+import sys
 import threading
 import tkinter as tk
+import urllib.request
+from pathlib import Path
 from tkinter import ttk
 
 import settings
+
+BASE = Path(__file__).parent
 
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -85,19 +94,25 @@ class Orb:
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.canvas.bind("<Button-3>", lambda e: self._quit())  # 右クリックで終了
+        self.canvas.bind("<Button-3>", self._on_right)  # 右クリックでメニュー
 
         self.theme = THEMES.get(settings.get("orb_theme", "moonlight"), THEMES["moonlight"])
         self._ripples: list[float] = []   # 各波紋の現在半径
         self._tick = 0
         self._settings_win = None
+        self.listening = False            # 聴取（voice.py 子プロセス）が動いているか
+        self.voice_proc = None
+        self.root.protocol("WM_DELETE_WINDOW", self._quit)
+        threading.Thread(target=_ensure_voicevox, daemon=True).start()  # VOICEVOX を裏で起動
+        self._poll_voice()                # 子プロセスが落ちたら聴取OFF表示に戻す監視
         self._animate()
 
     # ---- アニメーション（中心は静止、周囲が水の波紋のように広がる）----
     def _animate(self) -> None:
         th = self.theme
         self._tick += 1
-        if self._tick % RIPPLE_EVERY == 0:           # 静かに、定期的に波紋を落とす
+        every = max(10, RIPPLE_EVERY // 2) if self.listening else RIPPLE_EVERY  # 聴取中は波紋を速く
+        if self._tick % every == 0:                  # 定期的に波紋を落とす
             self._ripples.append(float(CORE_R))
 
         c = self.canvas
@@ -123,9 +138,11 @@ class Orb:
             c.create_oval(CENTER - rr, CENTER - rr, CENTER + rr, CENTER + rr,
                           fill=_lerp(th["body"], CHROMA_RGB, t), outline="")
 
-        # 中心の球：固定。中心ほど明るい同心円で“淡く光る球”に（反射＝オフセットの白点ではない）
+        # 中心の球：固定。中心ほど明るい同心円で“淡く光る球”に（反射＝オフセットの白点ではない）。
+        # 聴取中は芯を明るく（待機=落ち着き／聴取=起きてる、が一目で分かる）。
+        body = _lerp(th["body"], th["bright"], 0.35) if self.listening else _hex(th["body"])
         c.create_oval(CENTER - CORE_R, CENTER - CORE_R, CENTER + CORE_R, CENTER + CORE_R,
-                      fill=_hex(th["body"]), outline="")
+                      fill=body, outline="")
         r2 = CORE_R * 0.62
         c.create_oval(CENTER - r2, CENTER - r2, CENTER + r2, CENTER + r2,
                       fill=_lerp(th["body"], th["bright"], 0.55), outline="")
@@ -149,11 +166,65 @@ class Orb:
         self.root.geometry(f"+{self._press[2] + dx}+{self._press[3] + dy}")
 
     def _on_release(self, e) -> None:
-        if not self._moved:        # 動かさずに離した＝クリック → 設定
-            self._open_settings()
+        if not self._moved:        # 動かさずに離した＝クリック → 聴取ON/OFF
+            self._toggle_listening()
         self._press = None
 
+    def _on_right(self, e) -> None:
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label=("聴取を停止" if self.listening else "聴取を開始"),
+                         command=self._toggle_listening)
+        menu.add_command(label="設定", command=self._open_settings)
+        menu.add_separator()
+        menu.add_command(label="終了", command=self._quit)
+        menu.tk_popup(e.x_root, e.y_root)
+
+    # ---- 聴取（voice.py 子プロセス）の起動/停止 ----
+    def _toggle_listening(self) -> None:
+        if self.listening:
+            self._stop_voice()
+        else:
+            self._start_voice()
+
+    def _start_voice(self) -> None:
+        if self.voice_proc and self.voice_proc.poll() is None:
+            return  # 既に起動中
+        # コンソール付きで起動（認識テキスト/コストが見える＝「小さく残す」）。UTF-8 を強制。
+        py = sys.executable.replace("pythonw.exe", "python.exe")
+        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        flags = subprocess.CREATE_NEW_CONSOLE if IS_WINDOWS else 0
+        try:
+            self.voice_proc = subprocess.Popen([py, str(BASE / "voice.py")], cwd=str(BASE),
+                                               env=env, creationflags=flags)
+            self.listening = True
+        except Exception as e:  # noqa: BLE001
+            self._toast(f"起動失敗: {e}")
+
+    def _stop_voice(self) -> None:
+        if self.voice_proc and self.voice_proc.poll() is None:
+            try:
+                self.voice_proc.terminate()
+            except Exception:
+                pass
+        self.voice_proc = None
+        self.listening = False
+
+    def _poll_voice(self) -> None:
+        """子プロセスが自分で終了（「終了」と言われた等）したら、聴取OFF表示へ戻す。"""
+        if self.listening and (not self.voice_proc or self.voice_proc.poll() is not None):
+            self.listening = False
+            self.voice_proc = None
+        self.root.after(700, self._poll_voice)
+
+    def _toast(self, msg: str) -> None:
+        try:
+            from tkinter import messagebox
+            messagebox.showinfo("MyAgent", msg)
+        except Exception:
+            pass
+
     def _quit(self) -> None:
+        self._stop_voice()
         self.root.destroy()
 
     # ---- 設定画面 ----
@@ -243,6 +314,25 @@ class Orb:
 
     def run(self) -> None:
         self.root.mainloop()
+
+
+def _ensure_voicevox() -> None:
+    """VOICEVOX エンジン(50021)が落ちていれば、config から見つけて裏で起動する（best-effort）。"""
+    url = os.environ.get("VOICEVOX_URL", "http://127.0.0.1:50021").rstrip("/")
+    try:
+        urllib.request.urlopen(url + "/version", timeout=2)
+        return  # 既に起動中
+    except Exception:
+        pass
+    try:
+        import tools
+        target = tools._resolve_app(tools.load_config().get("apps", {}), "VOICEVOX")
+        if target and IS_WINDOWS:
+            os.startfile(target)  # .lnk からエンジンごと起動（数秒で立ち上がる）
+        elif target:
+            subprocess.Popen(["open", "-a", target])
+    except Exception:
+        pass
 
 
 def _safe_speak(text: str) -> None:
