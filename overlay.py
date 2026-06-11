@@ -189,13 +189,20 @@ class Orb:
     def _start_voice(self) -> None:
         if self.voice_proc and self.voice_proc.poll() is None:
             return  # 既に起動中
-        # コンソール付きで起動（認識テキスト/コストが見える＝「小さく残す」）。UTF-8 を強制。
+        # コンソール付きで起動（認識テキスト/コストが見える＝「小さく残す」）が、最小化して出す
+        # ＝邪魔にならず、見たい時だけタスクバーから開ける。UTF-8 を強制。
         py = sys.executable.replace("pythonw.exe", "python.exe")
         env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-        flags = subprocess.CREATE_NEW_CONSOLE if IS_WINDOWS else 0
+        flags = 0
+        si = None
+        if IS_WINDOWS:
+            flags = subprocess.CREATE_NEW_CONSOLE
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 7  # SW_SHOWMINNOACTIVE（最小化・フォーカス奪わない）
         try:
             self.voice_proc = subprocess.Popen([py, str(BASE / "voice.py")], cwd=str(BASE),
-                                               env=env, creationflags=flags)
+                                               env=env, creationflags=flags, startupinfo=si)
             self.listening = True
         except Exception as e:  # noqa: BLE001
             self._toast(f"起動失敗: {e}")

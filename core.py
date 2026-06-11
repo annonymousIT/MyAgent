@@ -422,9 +422,9 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
             forced = _force_save(reply)
             if forced:
                 reply = forced
-        # ストリームで未発声の返答（言い換え・ツール結果フォールバック等）は、ここで1回だけ発声する。
-        # 通常のストリーム成功時は reply == streamed["text"] なので二重に喋らない。
-        if on_sentence and not dry_run and reply and reply.strip() != streamed["text"].strip():
+        # ストリームで一度も発声していない時だけ（言い換え/ツール結果フォールバック等）、ここで1回発声する。
+        # ストリーム済みなら streamed["text"] が非空＝再発声しない（文字の微差で二重に喋るのを防ぐ）。
+        if on_sentence and not dry_run and reply and not streamed["text"].strip():
             on_sentence(reply)
 
         new_history = (history + [

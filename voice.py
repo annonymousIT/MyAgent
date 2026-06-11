@@ -43,7 +43,7 @@ import tools
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 FRAME = SAMPLE_RATE * FRAME_MS // 1000           # 480 samples/frame
-SILENCE_MS = int(os.environ.get("SILENCE_MS", "450"))  # 発話終了とみなす無音（600→450ms・体感短縮）
+SILENCE_MS = int(os.environ.get("SILENCE_MS", "550"))  # 発話終了とみなす無音（短すぎると喋り途中で切れる）
 SILENCE_FRAMES = SILENCE_MS // FRAME_MS
 PAD_FRAMES = 10                                   # 発話開始判定の前後バッファ
 MIN_SPEECH_FRAMES = 8                             # これ未満は雑音として無視
@@ -92,7 +92,8 @@ VOICE_HINT = ("\n[Voice mode] Your reply is read aloud, so be SHORT: one sentenc
 # 一時タブを閉じたあと「画面を戻す」対象にしないアプリ（ブラウザ自身など）
 _NO_RESTORE = {"Google Chrome", "Safari", "app_mode_loader"}
 
-_vad = webrtcvad.Vad(int(os.environ.get("VAD_AGGRESSIVENESS", "2")))
+# aggressiveness 0〜3：小さいほど「発話」と判定しやすい（＝感度が高い・取りこぼしにくい）。
+_vad = webrtcvad.Vad(int(os.environ.get("VAD_AGGRESSIVENESS", "1")))
 
 
 def _record_utterance(stream: "sd.InputStream") -> "np.ndarray | None":
@@ -113,7 +114,7 @@ def _record_utterance(stream: "sd.InputStream") -> "np.ndarray | None":
         is_speech = _vad.is_speech(frame.tobytes(), SAMPLE_RATE)
         if not triggered:
             ring.append((frame, is_speech))
-            if sum(s for _, s in ring) > 0.6 * ring.maxlen:
+            if sum(s for _, s in ring) > 0.5 * ring.maxlen:  # 出だしを拾いやすく（0.6→0.5）
                 triggered = True
                 voiced.extend(f for f, _ in ring)
                 ring.clear()
