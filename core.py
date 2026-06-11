@@ -117,6 +117,11 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False) -> di
             tool_results.append(
                 {"type": "tool_result", "tool_use_id": block.id, "content": result}
             )
+
+    # stop_reason が tool_use でも実 tool_use ブロックが無い稀ケース。空contentで
+    # フォロー呼び出しすると API 400 になるため、最初の応答テキストで返す。
+    if not tool_results:
+        return {"actions": actions, "reply": _text_of(response)}
     messages.append({"role": "user", "content": tool_results})
 
     final = client.messages.create(

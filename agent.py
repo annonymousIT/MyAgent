@@ -84,6 +84,10 @@ def handle(client, persona: str, user_input: str) -> str:
             tool_results.append(
                 {"type": "tool_result", "tool_use_id": block.id, "content": result}
             )
+
+    # 実 tool_use ブロックが無いときは空contentでの再呼び出し（API 400）を避ける。
+    if not tool_results:
+        return _text_of(response)
     messages.append({"role": "user", "content": tool_results})
 
     final = client.messages.create(

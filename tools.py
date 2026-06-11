@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
+import unicodedata
 import webbrowser
 from pathlib import Path
 
@@ -91,28 +92,40 @@ def _app_target(entry) -> "str | None":
     return None
 
 
+def _nfc(s: str) -> str:
+    """NFCに正規化する。
+
+    macOSのファイル名はNFD（濁点が分解：ダ＝タ+゙）で来るため config.auto.json のキーもNFD。
+    一方 LLM が出すのはNFC（ダ＝1文字）。突き合わせ前に両側そろえないと、
+    『Google カレンダー』のような濁点・半濁点を含む名前の完全一致が外れる。
+    """
+    return unicodedata.normalize("NFC", s)
+
+
 def _resolve_app(apps: dict, name: str) -> "str | None":
     """name（表示名 or エイリアス）から target を解決する。
 
     解決順：表示名の完全一致 → エイリアス完全一致 → 表示名/エイリアスの大小無視一致。
+    比較は常にNFC正規化して行う（macOSのNFDファイル名 vs LLMのNFC を吸収）。
     site のキーは小文字（youtube/github 等）、アプリ表示名は大小混在（YouTube/GitHub）
-    なので、衝突検出やLLMの表記ゆれを拾えるよう最後に大小無視で寄せる。
+    なので、衝突検出やLLMの表記ゆれを拾えるよう最後に大小無視でも寄せる。
     """
-    # 1) 表示名（キー）に完全一致
-    if name in apps:
-        return _app_target(apps[name])
-    # 2) エイリアスに完全一致（新スキーマのみ aliases を持つ）
-    for entry in apps.values():
-        if isinstance(entry, dict) and name in (entry.get("aliases") or []):
-            return _app_target(entry)
-    # 3) 大小無視で表示名/エイリアスに一致
-    lower = name.lower()
+    target = _nfc(name)
+    lower = target.lower()
+    # 1) 表示名（キー）に完全一致（NFC）
     for key, entry in apps.items():
-        if key.lower() == lower:
+        if _nfc(key) == target:
             return _app_target(entry)
-        if isinstance(entry, dict):
-            if any(lower == a.lower() for a in (entry.get("aliases") or [])):
-                return _app_target(entry)
+    # 2) エイリアスに完全一致（NFC）
+    for entry in apps.values():
+        if isinstance(entry, dict) and any(_nfc(a) == target for a in (entry.get("aliases") or [])):
+            return _app_target(entry)
+    # 3) 大小無視で表示名/エイリアスに一致（NFC）
+    for key, entry in apps.items():
+        if _nfc(key).lower() == lower:
+            return _app_target(entry)
+        if isinstance(entry, dict) and any(_nfc(a).lower() == lower for a in (entry.get("aliases") or [])):
+            return _app_target(entry)
     return None
 
 
