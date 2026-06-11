@@ -25,6 +25,8 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+import profile_store
+
 IS_MAC = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -286,22 +288,63 @@ def fetch_page(url: str) -> str:
     return text[:3000] if text else "（本文が取得できませんでした）"
 
 
-def get_weather(location: str) -> str:
-    """指定地のいまの天気を取得して伝える（B/ADR-0021・ソース=wttr.in、キー不要・実データ）。
+def _weather_desc(obj: dict) -> str:
+    """wttr.in j1 の天気説明。lang_ja があれば日本語、無ければ英語にフォールバック。"""
+    for key in ("lang_ja", "weatherDesc"):
+        arr = obj.get(key)
+        if arr and isinstance(arr, list) and arr[0].get("value"):
+            return arr[0]["value"].strip()
+    return "?"
 
-    返り値の実データをモデルが日本語で要約して伝える（捏造防止）。
+
+def _weather_summary(loc: str, data: dict) -> str:
+    """j1 JSON → 現在＋3日分（3時間毎）のコンパクトな実データ要約（モデルが読む材料）。"""
+    cur = (data.get("current_condition") or [{}])[0]
+    lines = [
+        f"{loc} の天気（実データ・wttr.in）:",
+        f"現在: {_weather_desc(cur)} {cur.get('temp_C', '?')}°C 体感{cur.get('FeelsLikeC', '?')}°C "
+        f"湿度{cur.get('humidity', '?')}% 風{cur.get('windspeedKmph', '?')}km/h",
+    ]
+    labels = ["今日", "明日", "明後日"]
+    for i, day in enumerate((data.get("weather") or [])[:3]):
+        parts = []
+        for h in day.get("hourly", []):
+            try:
+                t = int(h.get("time", "0")) // 100
+            except ValueError:
+                continue
+            parts.append(f"{t}時:{_weather_desc(h)}{h.get('tempC', '?')}°/降水{h.get('chanceofrain', '?')}%")
+        lines.append(
+            f"{labels[i] if i < 3 else ''}({day.get('date', '?')}) "
+            f"最低{day.get('mintempC', '?')}°〜最高{day.get('maxtempC', '?')}°: " + " ".join(parts)
+        )
+    return "\n".join(lines)
+
+
+def get_weather(location: str = "") -> str:
+    """指定地の天気（現在＋3日先までの3時間毎予報）を実データで取得して伝える（ADR-0021/0029）。
+
+    - 「明日の天気」「明日雨大丈夫？」に答えられるよう、j1(JSON) で予報まで取る。
+    - location が空ならプロファイルの既定地名（例: 茨木）を使う＝場所未指定でも答えられる。
+    - 返り値の実データをモデルが日本語で要約して伝える（捏造防止）。
     “見せる”用に天気ページもブラウザで開く（ephemeral：次ターンで自動クローズ）。
     """
-    loc = (location or "").strip() or "現在地"
+    loc = (location or "").strip() or profile_store.default_location() or "現在地"
     enc = urllib.parse.quote(loc)
-    try:
-        data = _http_get(f"https://wttr.in/{enc}?format=%l:+%c+%t+%w+%h+%p&m", ua="curl/8.0").strip()
-    except Exception as e:
-        return f"{loc} の天気が取得できませんでした（{type(e).__name__}）。"
     page = f"https://wttr.in/{enc}"
+    try:
+        raw = _http_get(f"https://wttr.in/{enc}?format=j1&lang=ja", ua="curl/8.0")
+        summary = _weather_summary(loc, json.loads(raw))
+    except Exception:
+        # 予報(JSON)が取れない時は従来の1行（現在のみ）にフォールバック
+        try:
+            data = _http_get(f"https://wttr.in/{enc}?format=%l:+%c+%t+%w+%h+%p&m", ua="curl/8.0").strip()
+            summary = f"天気（実データ・現在のみ）: {data}"
+        except Exception as e:
+            return f"{loc} の天気が取得できませんでした（{type(e).__name__}）。"
     webbrowser.open(page)            # 見せる
     _EPHEMERAL_OPENED.append(page)   # 用が済んだら次ターンで閉じる
-    return f"天気（実データ）: {data}"
+    return summary
 
 
 def play_media(query: str, kind: str = "video") -> str:
@@ -328,6 +371,24 @@ def play_media(query: str, kind: str = "video") -> str:
     url = "https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(q)
     webbrowser.open(url)
     return f"YouTube で「{q}」を検索して開きました（残します）。"
+
+
+# --------------------------------------------------------------------------
+# 永続記憶（remember / add_schedule / forget）— 実体は profile_store（ADR-0029）
+# --------------------------------------------------------------------------
+def remember(fact: str) -> str:
+    """個人情報・事実を profile.json に永続記憶する（「〜を覚えておいて」）。"""
+    return profile_store.remember(fact)
+
+
+def add_schedule(title: str, weekday: str = "", date: str = "", time: str = "") -> str:
+    """予定を登録する。weekday=毎週の繰り返し / date=日付指定（YYYY-MM-DD）。"""
+    return profile_store.add_schedule(title, weekday=weekday, date=date, time=time)
+
+
+def forget(query: str) -> str:
+    """query に該当する記憶・予定を削除する。"""
+    return profile_store.forget(query)
 
 
 def _osa(script: str) -> "tuple[bool, str]":
@@ -703,11 +764,10 @@ TOOL_DEFS = [
     },
     {
         "name": "get_weather",
-        "description": "指定した地名の『いまの天気』を実データで取得して伝える。天気を聞かれたら必ずこれを使う（想像で答えない）。引数 location は地名（例: 茨木, Tokyo）。取得した実データを日本語で要約して伝えること。",
+        "description": "指定した地名の天気（現在＋明日・明後日までの予報）を実データで取得して伝える。天気・気温・雨・傘の質問は必ずこれを使う（想像で答えない）。引数 location は地名（例: 茨木, Tokyo）。『大学』『学校』など場所語はプロファイルの場所解決表の地名に直して渡す。場所が分からなければ空でよい（既定地名を使う）。取得した実データだけを根拠に日本語で要約して伝えること。",
         "input_schema": {
             "type": "object",
-            "properties": {"location": {"type": "string", "description": "地名"}},
-            "required": ["location"],
+            "properties": {"location": {"type": "string", "description": "地名（省略可＝プロファイルの既定地）"}},
         },
     },
     {
@@ -744,6 +804,38 @@ TOOL_DEFS = [
         },
     },
     {
+        "name": "remember",
+        "description": "主人の個人情報・事実を永続記憶する。「〜を覚えておいて」「〜なんだよね（記憶してほしい文脈）」のとき使う。fact は後で読んで分かる自己完結の一文にする（例: 『大学=立命館 大阪いばらきキャンパス（場所: 茨木）』『彼女はあやさん』）。予定（曜日・日付があるもの）は remember ではなく add_schedule を使う。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"fact": {"type": "string", "description": "覚える事実（自己完結の一文）"}},
+            "required": ["fact"],
+        },
+    },
+    {
+        "name": "add_schedule",
+        "description": "予定を永続登録する。毎週の繰り返しなら weekday（月〜日）、特定日なら date（YYYY-MM-DD）を指定。『明日』『来週金曜』などの相対表現は、システムプロンプトの現在日時から絶対日付に直して date に入れる（自分で日付を想像しない）。time は HH:MM。例: 『毎週金曜19時に塾』→ title=塾, weekday=金, time=19:00。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "予定の内容（塾、ゼミ発表 など）"},
+                "weekday": {"type": "string", "description": "毎週の繰り返し曜日（月〜日）。日付指定なら空"},
+                "date": {"type": "string", "description": "日付指定 YYYY-MM-DD。繰り返しなら空"},
+                "time": {"type": "string", "description": "時刻 HH:MM（分からなければ空）"},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "forget",
+        "description": "記憶した事実・予定を削除する。「〜のこと忘れて」「塾やめたから消して」のとき使う。query は対象を特定できる語（例: あやさん, 塾）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "削除対象を特定する語"}},
+            "required": ["query"],
+        },
+    },
+    {
         "name": "close_app",
         "description": "開いているアプリやサイトを閉じる。「〜閉じて」「〜消して」「〜やめて」「もういい」などウィンドウ/アプリを閉じたい時に使う。name は閉じる対象（アプリ名・サイト名）。直前に開いたものを閉じる文脈なら、その名前を入れる。",
         "input_schema": {
@@ -766,6 +858,9 @@ DISPATCH = {
     "play_media": play_media,
     "manage_window": manage_window,
     "close_app": close_app,
+    "remember": remember,
+    "add_schedule": add_schedule,
+    "forget": forget,
 }
 
 

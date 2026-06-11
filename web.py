@@ -120,7 +120,8 @@ function bubble(who,text){
 const TOOLJP={
   open_site:'サイトを開く', launch_app:'アプリを起動', run_system:'システム操作',
   close_app:'閉じる', get_weather:'天気を取得', play_media:'動画/音楽を開く',
-  manage_window:'ウィンドウ配置', fetch_page:'ページ本文を取得', web_search:'Web検索', open_url:'URLを開く'
+  manage_window:'ウィンドウ配置', fetch_page:'ページ本文を取得', web_search:'Web検索', open_url:'URLを開く',
+  remember:'永続記憶に保存', add_schedule:'予定を登録', forget:'記憶を削除'
 };
 // 吹き出しの下に「どう判断して・何を実行したか」を出す（テスト用ログ）
 function judge(actions){

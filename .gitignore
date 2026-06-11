@@ -11,6 +11,9 @@ credentials.json
 token.json
 *.key
 
+# 個人プロファイル（個人情報・予定。雛形は profile.example.json）
+profile.json
+
 # マシン固有の自動生成設定（setup.py が再生成。ローカルパスを含むのでコミットしない）
 config.auto.json
 

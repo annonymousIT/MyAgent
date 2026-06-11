@@ -11,6 +11,7 @@ from pathlib import Path
 
 import anthropic
 
+import profile_store
 import tools
 
 MODEL = "claude-haiku-4-5"
@@ -89,12 +90,14 @@ def available_operations() -> str:
         "・play_media（動画/音楽）: 『〜の動画見たい/流して/聴きたい』。開いて残す。\n"
         "・manage_window（ウィンドウ配置）: 『左/右に寄せて・最大化・中央・一覧』。\n"
         "・fetch_page（ページ本文取得）/ web_search（検索）/ open_url（URLを開く）: 上記に無い調べもの（株価/ニュース/事実確認等）や『調べて/教えて』に実ソースで答える。\n"
+        "・remember（永続記憶）/ add_schedule（予定登録）/ forget（記憶削除）: 『覚えておいて』『毎週金曜19時に塾』『〜忘れて』。保存後は毎ターン上の記憶欄に出る。\n"
         "・アプリや検索を開くだけで終わらせず、取得した実データを根拠に答える。本当にPCで不可能なことだけ正直に断る（捏造しない）。"
     )
 
 
 def build_system_prompt(persona: str) -> str:
-    return persona + "\n\n" + available_operations()
+    # 人格 ＋ 個人コンテキスト（現在日時・プロフィール・直近予定 / ADR-0029）＋ 操作一覧
+    return persona + "\n\n" + profile_store.context_text() + "\n\n" + available_operations()
 
 
 MAX_HISTORY_MESSAGES = 10  # 直近5往復ぶんを保持（ADR-3：直近Nそのまま。古いものの要約は将来）
@@ -118,6 +121,8 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     messages = history + [{"role": "user", "content": user_input}]
 
     def _finish(reply: str) -> dict:
+        if reply == "（…）" and actions:  # ツール実行後にモデルが無言だった時の保険：直近のツール結果を返答に使う
+            reply = actions[-1]["result"]
         new_history = (history + [
             {"role": "user", "content": user_input},
             {"role": "assistant", "content": reply},

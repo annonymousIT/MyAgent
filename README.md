@@ -40,11 +40,23 @@
 | `open_site(name)` | 名前→URL表からURLを引いてブラウザで開く |
 | `launch_app(name)` | 名前→アプリ表から引いて起動（Win=exeパス / Mac=`open -a`） |
 | `run_system(name)` | 名前→システムコマンド表（音量・モニタ等）を実行。危険操作は確認を挟む |
-| `read_calendar(date)` | Googleカレンダー（全カレンダー）から予定取得 ※Step4 |
-| `read_todo()` | Google ToDo（Tasks API）から締切付きタスク取得 ※Step4 |
+| `get_weather(location?)` | wttr.in 実データで現在＋3日先の予報。場所未指定はプロファイルの既定地 |
+| `remember(fact)` | 個人情報・事実を `profile.json` に永続記憶（「〜覚えておいて」） |
+| `add_schedule(title, weekday\|date, time)` | 予定を永続登録（毎週繰り返し / 日付指定） |
+| `forget(query)` | 記憶した事実・予定を削除 |
+| `read_calendar(date)` | Googleカレンダー（全カレンダー）から予定取得 ※将来（#9） |
 | `come_home()` | 「ただいま」で発火。明日の予定＋TODOをまとめて報告 ※Step4 |
 
 拡張は設定表に1行足すだけ。
+
+### 永続パーソナル記憶（ADR-0029）
+
+予定や個人情報（大学の場所・生活リズム等）を `profile.json` にローカル永続化し、
+毎ターン「現在日時＋プロフィール＋直近7日の予定」をシステムプロンプトに注入する。
+これにより「明日の予定なんだっけ？」「大学（＝茨木）明日雨大丈夫かな」が記憶×実データで成立する。
+
+- `profile.json` は**個人情報なので .gitignore 済み**。`profile.example.json` をコピーして作る。
+- 日付・曜日の計算は Python 側（`profile_store.py`）。LLM に日付を計算・捏造させない。
 
 ### 設定の2層化（フレームワーク化 step1 / ADR-0011・0012・0016）
 
@@ -122,6 +134,7 @@ python3 agent.py
 
 - `ANTHROPIC_API_KEY`（環境変数）
 - 使うOSの設定ファイル（`config_win.json` または `config_mac.json`）の各URL（manaba 等）とアプリ（Win=実パス / Mac=アプリ名）
+- `profile.json`（`profile.example.json` をコピーして名前・場所・予定を書く。会話の「覚えておいて」でも追記される）
 
 ---
 
