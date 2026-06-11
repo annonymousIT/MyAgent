@@ -355,6 +355,35 @@ def _ui_processes() -> "list[str]":
     return [p.strip() for p in out.split(",")] if (ok and out) else []
 
 
+# 起動中アプリ一覧から除くノイズ（システムUI・開発ツール・自分自身）
+_RUNNING_IGNORE = {
+    "Finder", "Terminal", "iTerm2", "Claude", "Code", "parsecd", "Copilot",
+    "Dock", "Control Center", "Control Centre", "Spotlight", "SystemUIServer",
+    "Notification Center", "Notification Centre", "WindowManager", "loginwindow",
+    "app_mode_loader",
+}
+
+
+def running_apps() -> "list[str]":
+    """いま起動中でUIを持つネイティブアプリ名の一覧（Activity Monitor の軽量版 / Issue #20）。
+
+    System Events のプロセス名一覧（1回・高速）からノイズ（システムUI・開発ツール・自分自身）を除く。
+    注意: Chrome PWA は実体が "app_mode_loader" に潰れて個別判別できないため、ここには出ない
+    （PWAの開閉確実性は launch_app の idempotent 起動＝開いていれば前面化、で担保する）。
+    エージェントが「いま何が開いているか」を把握し、再起動や“やってない配置”の捏造を避けるための材料。
+    """
+    if not IS_MAC:
+        return []
+    seen, res = set(), []
+    for it in _ui_processes():
+        it = it.strip()
+        if not it or it in _RUNNING_IGNORE or it in seen:
+            continue
+        seen.add(it)
+        res.append(it)
+    return res
+
+
 def _window_process(app: str) -> str:
     """app名（表示名/エイリアス）→ 実在する System Events プロセス名に解決。空なら最前面。
 
@@ -459,11 +488,11 @@ _WINDOW_ACTIONS = {
 }
 
 
-def manage_window(action: str, app: str = "") -> str:
+def manage_window(action: str, app: str = "", _relaunched: bool = False) -> str:
     """ウィンドウを配置する（A+D・要アクセシビリティ許可 / #23・ADR-0025）。
 
     action: left（左半分）/ right（右半分）/ maximize（最大化）/ center（中央）/ list（一覧）。
-    app: 対象アプリ名（省略時は最前面のウィンドウ）。
+    app: 対象アプリ名（省略時は最前面のウィンドウ）。対象が開いていなければ自動で起動して並べる。
     メインディスプレイ前提（マルチモニタ配置は別トラック=Hammerspoon）。
     """
     if not IS_MAC:
@@ -532,6 +561,16 @@ def manage_window(action: str, app: str = "") -> str:
             "システム設定 → プライバシーとセキュリティ → アクセシビリティ で、"
             "この端末（Terminal/iTerm 等）を許可してください。"
         )
+    # 対象アプリが開いていない可能性 → 起動して一度だけ並べ直す（PWA未起動でも自己修復）
+    if app and app.strip() and not _relaunched:
+        target = _resolve_app(load_config().get("apps", {}), app)
+        if target:
+            try:
+                subprocess.Popen(["open", "-a", target])
+            except Exception:
+                pass
+            time.sleep(1.3)  # ウィンドウ生成待ち
+            return manage_window(action, app, _relaunched=True)
     return f"{proc} のウィンドウ操作に失敗しました（ウィンドウが無い可能性）。"
 
 

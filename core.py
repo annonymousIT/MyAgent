@@ -73,7 +73,12 @@ def available_operations() -> str:
     sites = "、".join(cfg.get("sites", {}).keys())
     apps = "、".join(_app_label(name, entry) for name, entry in cfg.get("apps", {}).items())
     system = "、".join(list(cfg.get("system", {}).keys()) + list(cfg.get("dangerous_system", {}).keys()))
+    running = "、".join(tools.running_apps()) or "(取得なし)"
     return (
+        f"【いま起動中のアプリ（現在の実状態）】: {running}\n"
+        "※これは今この瞬間に開いているアプリ。これを基準に判断する。ここに無いアプリは閉じている前提。"
+        "ただし Chrome の PWA（YouTube/Gmail/moodle等）はこの一覧に出ないので、開閉が不確かなら launch_app で開く"
+        "（launch_app は開いていれば前面化するだけで無害）。\n"
         "【いまPCで実行できること（使うツール）】\n"
         "・サイトとアプリで同名が両方ある時はアプリ(専用ウィンドウ)を優先します。\n"
         f"・open_site（サイトを開く）の name 候補: {sites}\n"
