@@ -414,7 +414,11 @@ _NATIVE_TILE = {
 
 
 def _native_tile(proc: str, item: str, submenu: "str | None") -> "tuple[bool, str]":
-    """Window メニューの純正タイルを叩く（前面化→メニュー項目クリック）。"""
+    """Window メニューの純正タイルを叩く（前面化→本体ウィンドウを最前面に→メニュー項目クリック）。
+
+    Discord等は小さな副ウィンドウを複数持ち、それにタイルが当たると本体が並ばず重なる。
+    クリック前に「一番大きいウィンドウ＝本体」をAXRaiseして、本体に確実に当てる。
+    """
     if submenu:
         click = (
             f'click menu item "{item}" of menu 1 of menu item "{submenu}" '
@@ -426,6 +430,22 @@ def _native_tile(proc: str, item: str, submenu: "str | None") -> "tuple[bool, st
         f'tell application "System Events" to tell process "{proc}"\n'
         f'  set frontmost to true\n'
         f'  delay 0.35\n'
+        f'  try\n'
+        f'    set best to missing value\n'
+        f'    set bestArea to -1\n'
+        f'    repeat with w in windows\n'
+        f'      set sz to size of w\n'
+        f'      set a to (item 1 of sz) * (item 2 of sz)\n'
+        f'      if a > bestArea then\n'
+        f'        set bestArea to a\n'
+        f'        set best to w\n'
+        f'      end if\n'
+        f'    end repeat\n'
+        f'    if best is not missing value then\n'
+        f'      perform action "AXRaise" of best\n'
+        f'      delay 0.15\n'
+        f'    end if\n'
+        f'  end try\n'
         f'  {click}\n'
         f'end tell'
     )
