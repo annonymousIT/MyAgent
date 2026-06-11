@@ -74,11 +74,14 @@ def available_operations() -> str:
     apps = "、".join(_app_label(name, entry) for name, entry in cfg.get("apps", {}).items())
     system = "、".join(list(cfg.get("system", {}).keys()) + list(cfg.get("dangerous_system", {}).keys()))
     return (
-        "【いま利用可能な操作（この一覧の名前しか実行できません。無いものは正直に「用意がない」と答える）】\n"
+        "【いまPCで実行できること】\n"
         "・サイトとアプリで同名が両方ある時はアプリ(専用ウィンドウ)を優先します。\n"
         f"・open_site の name 候補: {sites}\n"
         f"・launch_app の name 候補（カッコ内は呼び名・略語、それでも引けます）: {apps}\n"
-        f"・run_system の name 候補: {system}"
+        f"・run_system の name 候補: {system}\n"
+        "・上の一覧に無い情報・調べもの（天気/株価/ニュース等）や『〜どう？/調べて/教えて』は、"
+        "web_search（または open_url）で答えを届ける。アプリを開くだけで終わらせない。"
+        "本当にPCで不可能なことだけ正直に断る（答えを想像で捏造しない）。"
     )
 
 

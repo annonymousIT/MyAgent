@@ -16,6 +16,7 @@ import json
 import platform
 import subprocess
 import unicodedata
+import urllib.parse
 import webbrowser
 from pathlib import Path
 
@@ -204,6 +205,30 @@ def run_system(name: str) -> str:
     return f"『{name}』に対応するシステムコマンドが {CONFIG_HINT} にありません。"
 
 
+def web_search(query: str) -> str:
+    """登録ソースに無い情報を『届ける』ための汎用Web検索（Tier2 / ADR-0018）。
+
+    天気・株価・ニュースなど、知りたい情報をブラウザの検索結果として開く。
+    捏造防止：答えを想像で言わず、必ず実ソース（検索結果）を開く。Step3で読み上げまで繋げる。
+    """
+    if not query or not query.strip():
+        return "検索語が空です。"
+    url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
+    webbrowser.open(url)
+    return f"「{query}」を検索しました。"
+
+
+def open_url(url: str) -> str:
+    """任意のURLをブラウザで開く（Tier2 / ADR-0018）。明確なURLが分かっているときに使う。"""
+    if not url or not url.strip():
+        return "URLが空です。"
+    target = url.strip()
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+    webbrowser.open(target)
+    return f"{target} を開きました。"
+
+
 # Claude に渡すツール定義（tool use）
 TOOL_DEFS = [
     {
@@ -233,6 +258,24 @@ TOOL_DEFS = [
             "required": ["name"],
         },
     },
+    {
+        "name": "web_search",
+        "description": "知りたい情報をブラウザの検索で開く。登録済みのサイト/アプリで直接得られない情報（天気・株価・ニュース・調べもの等）を扱うとき、または『〜どう？/〜は？/調べて/教えて』のように答えを知りたいときに使う。答えを想像で言わず必ずこれで実ソースを開く（捏造防止）。引数 query は検索語（例: 茨木 天気, NVIDIA 株価）。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "検索語"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "open_url",
+        "description": "指定されたURLをブラウザで開く。明確なURLが分かっているときに使う。引数 url は開くURL。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "開くURL"}},
+            "required": ["url"],
+        },
+    },
 ]
 
 # ツール名 → 実関数
@@ -240,6 +283,8 @@ DISPATCH = {
     "open_site": open_site,
     "launch_app": launch_app,
     "run_system": run_system,
+    "web_search": web_search,
+    "open_url": open_url,
 }
 
 
