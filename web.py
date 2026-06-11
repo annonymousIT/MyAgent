@@ -9,12 +9,41 @@
 
 from __future__ import annotations
 
+import calendar
+import datetime
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import core
 import speak as speak_mod
 import tools
+
+# 実測コストの記録（1ターン1行のJSONL・円）。月500円目標の監視用（ADR-0033）。gitignore対象。
+COSTS_PATH = Path(__file__).parent / "costs.jsonl"
+
+
+def _log_cost(usage: dict) -> dict:
+    """今ターンの実測コストを記録し、今日/今月/月ペース(円)を返す。"""
+    now = datetime.datetime.now()
+    with open(COSTS_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": now.isoformat(timespec="seconds"),
+                            "yen": usage["yen"], "calls": usage["calls"]}) + "\n")
+    today = month = 0.0
+    d_pref, m_pref = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
+    for line in open(COSTS_PATH, encoding="utf-8"):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r["ts"].startswith(m_pref):
+            month += r["yen"]
+            if r["ts"].startswith(d_pref):
+                today += r["yen"]
+    days_in_month = calendar.monthrange(now.year, now.month)[1]
+    pace = month / now.day * days_in_month  # このペースで使うと月いくらか
+    return {"turn": round(usage["yen"], 2), "today": round(today, 1),
+            "month": round(month, 1), "pace": round(pace)}
 
 PORT = 8765
 
@@ -92,6 +121,7 @@ PAGE = """<!doctype html>
     <header>
       <span class="dot"></span>
       <h1>MyAgent — 動作確認</h1>
+      <span class="sub" id="cost"></span>
       <span class="sub">テキスト入力（音声の代わり）</span>
     </header>
     <div class="log" id="log"></div>
@@ -157,6 +187,11 @@ async function send(){
     hideTyping();
     if(data.error){ bubble('bot','⚠ エラー: '+data.error); }
     else{ bubble('bot', data.reply); judge(data.actions); }  // 吹き出し→その下に判断ログ
+    if(data.cost){
+      const c=data.cost, el=document.getElementById('cost');
+      el.textContent=`¥${c.turn}｜今日¥${c.today}｜今月¥${c.month}（ペース¥${c.pace}/月）`;
+      el.style.color = c.pace>500 ? '#ff7a7a' : 'var(--muted)';  // 月500円ペース超で赤
+    }
   }catch(e){ hideTyping(); bubble('bot','⚠ 通信エラー: '+e); }
   btn.disabled=false; input.disabled=false; input.focus();
 }
@@ -215,6 +250,8 @@ class Handler(BaseHTTPRequestHandler):
             result = core.run_turn(self.client, self.persona, text, dry_run=dry, history=Handler.history)
             Handler.history = result.pop("history", Handler.history)  # 次ターンへ持ち越し（clientには返さない）
             Handler.pending_ephemeral = result.pop("ephemeral", [])  # 今ターンの一時タブは次ターンで閉じる
+            u = result.pop("usage", None)
+            result["cost"] = _log_cost(u) if u else None  # 実測コスト（今ターン/今日/今月/ペース）
             if aloud and result.get("reply"):  # 読み上げ（端で発声・非ブロッキング・ADR-0024）
                 speak_mod.speak(result["reply"], block=False)
             self._send(200, json.dumps(result, ensure_ascii=False), "application/json; charset=utf-8")

@@ -80,9 +80,35 @@ def static_menu() -> str:
         "- If intent maps to a registered op, do it; if ambiguous between several, ask one short question.\n"
         "- Deliver real info: weather/temp/rain -> get_weather; article/page content -> fetch_page; "
         "other lookups (stocks/news/facts) or 調べて/教えて -> web_search/open_url. Never invent; cite the fetched data.\n"
-        "- Media (動画見たい/流して/聴きたい) -> play_media (stays open). Close (閉じて/消して/やめて) -> close_app. "
-        "Window (左/右/最大化/中央) -> manage_window.\n"
+        "- Media (動画見たい/流して/聴きたい) -> play_media (stays open). Close (閉じて/消して/やめて) -> close_app "
+        "(never confuse with system ops like モニタ消す; if context says an app was just opened, close that one).\n"
+        "- Window (左/右/最大化/中央) -> manage_window. For requests like 'A左、B右', launch any missing app first, "
+        "then place both — complete launch+placement in one turn.\n"
         "- Remember/schedule/forget per the hard rules above.\n"
+        "- Pure greetings/small talk (おはよ etc.): no tools; reply in character, weaving in a caring note from "
+        "memory or upcoming schedule when natural.\n"
+        "- If an utterance implies an action (友達と通話する -> open the call app), act on it; don't just chat.\n"
+        "- Never paste raw tool-result strings into the reply; always rephrase in your own voice. "
+        "If a tool fails, say so honestly, in character.\n"
+        "- Only what is truly impossible on this PC gets an honest 'can't do' (e.g. air conditioners, physical objects).\n"
+        "- Multi-step example: 'Discordを左、moodleを右' -> launch_app(Discord), launch_app(moodle+R), "
+        "manage_window(left, Discord), manage_window(right, moodle+R), then one short in-character summary.\n"
+        "- Ambiguous media like あれ流して with no prior context: ask what to play instead of guessing. "
+        "With context (e.g. a song was just discussed), play that.\n"
+        "- Weather replies: summarize the fetched data concretely (sky, temp, rain chance, advice like 傘) "
+        "and tie it to the user's schedule when relevant; never pad with invented numbers.\n"
+        "- Dangerous system ops (再起動/寝る etc.) always need explicit confirmation first; "
+        "closing the user's own windows with unsaved work also deserves a quick check.\n"
+        "- When asked 何ができるの, give a short in-character tour of capabilities (apps, sites, system, "
+        "window tiling, weather/web lookups, memory & schedule), not a raw list dump.\n"
+        "- ただいま (coming home): greet warmly in character, then report anything left on today's schedule "
+        "and one caring note (e.g. tomorrow's first event). おやすみ: short good-night + a nudge about "
+        "tomorrow's earliest plan. いってきます: send-off + relevant weather/umbrella note if known.\n"
+        "- Tone calibration: scolding is a pinch of spice, not every line — at most one small jab per reply, "
+        "then genuine support. When Master reports effort or success (課題終わった etc.), drop the jab and "
+        "praise honestly first. Vary phrasing; avoid repeating the same nag twice in a row.\n"
+        "- Keep replies 1-2 sentences for actions; up to 3 short sentences when weaving weather+schedule. "
+        "No bullet lists or markdown in replies — natural speech only (it may be read aloud by TTS).\n"
         f"- open_site names: {sites}\n"
         f"- launch_app names (also openable by alias/reading; resolver handles it): {apps}\n"
         f"- run_system names: {system}"
@@ -128,6 +154,16 @@ def build_system_prompt(persona: str):
 MAX_HISTORY_MESSAGES = 6  # 直近3往復（コスト最適化で10→6。古いものの要約は将来）
 MAX_TOOL_ROUNDS = 5  # 「起動→配置」など複数ステップを許す。暴走防止に上限を設ける
 
+# 料金（claude-haiku-4-5・$/MTok）と円換算。実測コストメーターの基礎（ADR-0033）。
+_PRICE = {"in": 1.00, "out": 5.00, "cw": 1.25, "cr": 0.10}  # 入力/出力/キャッシュ書込1.25x/読出0.1x
+JPY_PER_USD = float(os.environ.get("JPY_PER_USD", "155"))
+
+
+def _cost_yen(u: dict) -> float:
+    usd = (u["in"] * _PRICE["in"] + u["out"] * _PRICE["out"]
+           + u["cw"] * _PRICE["cw"] + u["cr"] * _PRICE["cr"]) / 1_000_000
+    return usd * JPY_PER_USD
+
 # 捏造ガード（ADR-0030）: 保存ツール／保存"完了"を断定する言い回し
 _SAVE_TOOLS = {"remember", "add_schedule", "forget"}
 _SAVE_CLAIMS = ("覚えました", "覚えておきました", "記憶しました", "登録しました", "登録完了",
@@ -150,6 +186,17 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     system_prompt = build_system_prompt(persona)  # 人格 ＋ ②材料（利用可能な操作一覧）
     messages = history + [{"role": "user", "content": user_input}]
 
+    # 今ターンの実測使用量（全API呼び出し合算：ループ＋ガード＋言い換え）→ _finishで円換算
+    usage = {"in": 0, "out": 0, "cw": 0, "cr": 0, "calls": 0}
+
+    def _acc(resp) -> None:
+        u = resp.usage
+        usage["in"] += u.input_tokens
+        usage["out"] += u.output_tokens
+        usage["cw"] += getattr(u, "cache_creation_input_tokens", 0) or 0
+        usage["cr"] += getattr(u, "cache_read_input_tokens", 0) or 0
+        usage["calls"] += 1
+
     def _force_save(claim_reply: str) -> "str | None":
         """「保存しました」と言ったのにツールを呼んでいない時、ツールを強制して本当に保存させる。"""
         msgs = history + [
@@ -161,6 +208,7 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
         try:
             r = client.messages.create(model=MODEL, max_tokens=300, system=system_prompt,
                                        tools=tools.TOOL_DEFS, tool_choice={"type": "any"}, messages=msgs)
+            _acc(r)
         except Exception:
             return None
         saved = None
@@ -173,16 +221,22 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
         return saved
 
     def _rephrase(result: str) -> str:
-        """ツール結果を人格・口調で一言に言い換える（無言フォールバックでロボ口調が漏れるのを防ぐ）。"""
+        """ツール結果を人格・口調で一言に言い換える（無言フォールバックでロボ口調が漏れるのを防ぐ）。
+
+        tools を付けて呼ぶ（toolsはプロンプト先頭に描画されるため、外すとprefixが変わり
+        キャッシュmissで安定部をフル課金してしまう）。tool_choice=none で発話だけさせる。
+        """
         try:
             r = client.messages.create(
                 model=MODEL, max_tokens=150, system=system_prompt,
+                tools=tools.TOOL_DEFS, tool_choice={"type": "none"},
                 messages=[
                     {"role": "user", "content": user_input},
                     {"role": "user", "content": f"（システム）今の操作の結果はこうです:「{result}」。"
                      "事実は変えずに、これをあなたの口調・人格でマスターへ一言だけ伝えてください。"},
                 ],
             )
+            _acc(r)
             t = _text_of(r)
             return t if t != "（…）" else result
         except Exception:
@@ -203,8 +257,9 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
             {"role": "assistant", "content": reply},
         ])[-MAX_HISTORY_MESSAGES:]
         # ephemeral（今ターンで開いた一時タブのURL）も返す。呼び出し側が次ターンで閉じる（ADR-0021）。
+        usage["yen"] = round(_cost_yen(usage), 3)  # 実測コスト（円）
         return {"actions": actions, "reply": reply, "history": new_history,
-                "ephemeral": tools.pop_ephemeral_opened()}
+                "ephemeral": tools.pop_ephemeral_opened(), "usage": usage}
 
     # ツールが尽きる（テキストで返してくる）まで回す。これにより「起動→配置」のような
     # 複数ステップが1ターン内で完結する（旧実装は1ラウンドで打ち切り、2手目のtool_useを捨てていた）。
@@ -213,6 +268,7 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
         response = client.messages.create(
             model=MODEL, max_tokens=400, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
         )
+        _acc(response)
         if response.stop_reason != "tool_use":
             return _finish(_text_of(response))
 
@@ -239,10 +295,13 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
             return _finish(_text_of(response))
         messages.append({"role": "user", "content": tool_results})
 
-    # 上限まで回しても止まらなかった：最後にツール無しで締めの一言だけ書かせる
+    # 上限まで回しても止まらなかった：最後に締めの一言だけ書かせる
+    # （tools を外すとprefixが変わりキャッシュmissになるので、付けたまま tool_choice=none で封じる）
     final = client.messages.create(
-        model=MODEL, max_tokens=300, system=system_prompt, messages=messages
+        model=MODEL, max_tokens=300, system=system_prompt,
+        tools=tools.TOOL_DEFS, tool_choice={"type": "none"}, messages=messages
     )
+    _acc(final)
     reply = _text_of(final)
     if reply == "（…）" and actions:  # 実行後にモデルが何も言わなかった時の保険：ツール結果を返答に使う
         reply = actions[-1]["result"]
