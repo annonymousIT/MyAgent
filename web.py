@@ -13,6 +13,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import core
+import speak as speak_mod
 import tools
 
 PORT = 8765
@@ -92,11 +93,13 @@ PAGE = """<!doctype html>
         <button id="send">送信</button>
       </div>
       <label class="opt"><input type="checkbox" id="dry" checked> ドライラン（実際には開かず、選ばれたツールと返答だけ確認）</label>
+      <label class="opt"><input type="checkbox" id="aloud"> 読み上げ（返答を音声で。VOICEVOX起動中ならVOICEVOX、無ければOS標準）</label>
     </div>
   </div>
 <script>
 const log=document.getElementById('log'), input=document.getElementById('msg'),
-      btn=document.getElementById('send'), dry=document.getElementById('dry');
+      btn=document.getElementById('send'), dry=document.getElementById('dry'),
+      aloud=document.getElementById('aloud');
 
 function el(cls,html){const d=document.createElement('div');d.className=cls;if(html!==undefined)d.innerHTML=html;return d}
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
@@ -121,7 +124,7 @@ async function send(){
   btn.disabled=true; input.disabled=true; showTyping();
   try{
     const res=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text, dry_run:dry.checked})});
+      body:JSON.stringify({text, dry_run:dry.checked, read_aloud:aloud.checked})});
     const data=await res.json();
     hideTyping();
     if(data.error){ bubble('bot','⚠ エラー: '+data.error); }
@@ -168,6 +171,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             text = (payload.get("text") or "").strip()
             dry = bool(payload.get("dry_run", True))
+            aloud = bool(payload.get("read_aloud", False))
             if not text:
                 self._send(200, json.dumps({"actions": [], "reply": "（何か入力してください）"}), "application/json")
                 return
@@ -183,6 +187,8 @@ class Handler(BaseHTTPRequestHandler):
             result = core.run_turn(self.client, self.persona, text, dry_run=dry, history=Handler.history)
             Handler.history = result.pop("history", Handler.history)  # 次ターンへ持ち越し（clientには返さない）
             Handler.pending_ephemeral = result.pop("ephemeral", [])  # 今ターンの一時タブは次ターンで閉じる
+            if aloud and result.get("reply"):  # 読み上げ（端で発声・非ブロッキング・ADR-0024）
+                speak_mod.speak(result["reply"], block=False)
             self._send(200, json.dumps(result, ensure_ascii=False), "application/json; charset=utf-8")
         except Exception as e:
             self._send(200, json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False), "application/json; charset=utf-8")
