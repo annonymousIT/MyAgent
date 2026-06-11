@@ -20,6 +20,15 @@
       ]
     }
   },
+  "_aliases_help": "あだ名→アプリ表示名。既存アプリに呼び名を足すだけ（エントリ複製不要）。自分の口癖を足す。",
+  "aliases": {
+    "ばろ": "VALORANT",
+    "ばろらん": "VALORANT",
+    "電話": "Discord",
+    "通話": "Discord",
+    "でぃす": "Discord",
+    "ぶいすこ": "Visual Studio Code"
+  },
   "system": {
     "音量下げる": "osascript -e 'set volume output volume 25'",
     "音量上げる": "osascript -e 'set volume output volume 70'",

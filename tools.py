@@ -85,6 +85,18 @@ def load_config() -> dict:
     for name in user.get("hide", []):
         merged_apps.pop(name, None)
 
+    # user の "aliases"（あだ名→アプリ表示名）を、既存アプリの aliases に注入する。
+    # 例: {"ばろ": "VALORANT"} で「ばろ」が VALORANT を引けるようになる（エントリ全体を複製せず追加だけ）。
+    for nick, appname in user.get("aliases", {}).items():
+        tgt = _nfc(str(appname)).lower()
+        for key, entry in merged_apps.items():
+            if isinstance(entry, dict) and _nfc(key).lower() == tgt:
+                al = list(entry.get("aliases") or [])
+                if nick not in al:
+                    al.append(nick)
+                entry["aliases"] = al
+                break
+
     return {
         "sites": user.get("sites", {}),
         "apps": merged_apps,
