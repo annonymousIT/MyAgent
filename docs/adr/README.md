@@ -21,5 +21,7 @@ ADR が正本（git履歴に残る）、Issue は窓口。([ADR-0010](0010-decis
 | 0014 | [言い間違い・誤認識の吸収（可逆性段階化＋エコー）](0014-misspeak-handling.md) | 採用 |
 | 0015 | [ブラウザの開き方（既定・新規タブ・通常プロファイル）](0015-browser-open-behavior.md) | 採用 |
 | 0016 | [サイトとPWAアプリの衝突解決（PWA優先）](0016-site-vs-pwa-app.md) | 採用 |
+| 0018 | [登録外でもPC内でできる範囲で最大限応える](0018-resourceful-within-pc.md) | 採用 |
+| 0019 | [権限・能力モデル（可逆性ベースの3段階）](0019-permission-model.md) | 採用 |
 
 ※ #0001〜0009 は初期の設計判断（[../issues_plan.md](../issues_plan.md) 参照）。本ディレクトリは #0010 以降を正本として管理する。
