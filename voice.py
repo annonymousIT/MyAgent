@@ -63,8 +63,11 @@ FILLER_AFTER = 0.9  # 秒。これより早くLLMが返れば相槌なし
 # 一度起動したら AWAKE_WINDOW 秒は呼びかけ不要で連続会話できる。
 WAKE_PHRASE = os.environ.get("WAKE_PHRASE", "やっほーエージェント")
 AWAKE_WINDOW = float(os.environ.get("AWAKE_WINDOW_SEC", "20"))
-# Whisperの表記ゆれ（やっほー/ヤッホー/やっほ 等）を緩く拾う。「やっほ*＋エージェント」を起動とみなす。
-_WAKE_RE = re.compile(r"(やっほ[ーぉお]?|ヤッホ[ーォ]?|ﾔｯﾎ[ｰ]?)\s*エージェント")
+# 起動判定は「エージェント」を核にする。Whisper base は「やっほー」を「やはー/やほ」等に崩すため、
+# 先頭の挨拶（や/ヤ始まり）は任意・曖昧でも可とし、文頭の『（やほ的な語？）＋エージェント』を起動とみなす。
+# 「エージェント」は日常会話・ゲーム中にまず出ないので、これを核にしても誤爆は少ない。
+_WAKE_RE = re.compile(
+    r"^(?:[やヤﾔ]\S{0,3})?(エージェント|エイジェント|ｴｰｼﾞｪﾝﾄ|エージェン|agent)", re.IGNORECASE)
 
 
 def _norm(s: str) -> str:
