@@ -47,7 +47,10 @@ SILENCE_MS = int(os.environ.get("SILENCE_MS", "550"))  # 発話終了とみな�
 SILENCE_FRAMES = SILENCE_MS // FRAME_MS
 PAD_FRAMES = 10                                   # 発話開始判定の前後バッファ
 MIN_SPEECH_FRAMES = 8                             # これ未満は雑音として無視
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")  # baseは約5倍速・短い命令なら十分
+# small は base より格段に精度が高い（「電卓/ディスコード/原神」等の取り違えが激減）。
+# GPU(cuda)があれば一瞬、無ければCPUでも約1.5秒で実用。環境変数で上書き可。
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
+WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "auto")  # auto / cuda / cpu
 
 # その一言だけ言ったときのみ終了（「ゲーム終了して」等の誤爆防止で完全一致）
 EXIT_WORDS = ("終了", "バイバイ", "ばいばい")
@@ -186,10 +189,41 @@ def _is_noise(text: str) -> bool:
     return False
 
 
+def _add_cuda_dll_dirs() -> None:
+    """faster-whisper(GPU) が要る cuBLAS/cuDNN の DLL（nvidia の pip パッケージ同梱）を検索パスへ。"""
+    import glob
+    site = Path(__file__).parent / ".venv" / "Lib" / "site-packages" / "nvidia"
+    for d in glob.glob(str(site / "*" / "bin")):
+        try:
+            os.add_dll_directory(d)
+        except Exception:
+            pass
+
+
+def _load_whisper():
+    """Whisper モデルを読み込む。device=auto なら GPU を試し、ダメなら CPU に自動フォールバック。"""
+    from faster_whisper import WhisperModel
+    want = WHISPER_DEVICE
+    if want in ("auto", "cuda"):
+        try:
+            _add_cuda_dll_dirs()
+            m = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
+            list(m.transcribe(np.zeros(16000, dtype=np.float32), language="ja", beam_size=1)[0])
+            print(f"  Whisper: {WHISPER_MODEL} / GPU(cuda)", flush=True)
+            return m
+        except Exception as e:  # noqa: BLE001
+            if want == "cuda":
+                print(f"  GPU指定だが使えません（{type(e).__name__}）。CPUに切替。", flush=True)
+            else:
+                print("  GPU未使用→CPUで動かします（GPUを使うとより速い）。", flush=True)
+    m = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    print(f"  Whisper: {WHISPER_MODEL} / CPU", flush=True)
+    return m
+
+
 def main() -> None:
     print("Whisper モデル読込中…（初回はDLあり）", flush=True)
-    from faster_whisper import WhisperModel
-    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    model = _load_whisper()
     # ウォームアップ（初回呼び出しの遅延をここで吸収）
     list(model.transcribe(np.zeros(8000, dtype=np.float32), language="ja", beam_size=1)[0])
 
