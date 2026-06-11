@@ -28,9 +28,9 @@ IS_MAC = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
 VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://127.0.0.1:50021").rstrip("/")
-# 既定 6=四国めたん(ツンツン)。ちょい毒舌・世話焼きの女性人格に合わせた選択（ADR-0031）。
-# 変えたいときは環境変数 VOICEVOX_SPEAKER で（例: 18=九州そら ツンツン, 9=波音リツ クール）。
-VOICEVOX_SPEAKER = os.environ.get("VOICEVOX_SPEAKER", "6")
+# 既定 14=冥鳴ひまり(ノーマル)。ユーザー選定(2026-06-11)。落ち着いた声でちょい毒舌世話焼きに合う。
+# 変えたいときは環境変数 VOICEVOX_SPEAKER で（例: 6=四国めたん ツンツン, 9=波音リツ クール）。
+VOICEVOX_SPEAKER = os.environ.get("VOICEVOX_SPEAKER", "14")
 
 # `say` 用の日本語ボイス（VOICEVOX未導入時のフォールバック）。英語ボイスだと日本語＝記号読みになる。
 SAY_VOICE = os.environ.get("SAY_VOICE", "Kyoko")
