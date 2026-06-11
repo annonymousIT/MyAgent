@@ -773,11 +773,15 @@ def _close_app_win(name: str = "") -> str:
     target_name = (name or "").strip()
     if not target_name:
         return "何を閉じますか？（アプリ名やサイト名を教えてください）"
-    exe = _app_exe(load_config().get("apps", {}), target_name)
+    entry = _resolve_entry(load_config().get("apps", {}), target_name)
+    exe = entry.get("exe", "") if isinstance(entry, dict) else ""
     if exe and win_ops.close_exe(exe):
         return f"{target_name} を閉じました。"
     if exe:
         return f"{target_name} は開いていないようです。"
+    if isinstance(entry, dict) and entry.get("kind") == "uwp":
+        # ストアアプリは固有 exe を持たず taskkill で閉じられない（誤って別アプリを巻き込まないため触らない）
+        return f"{target_name} はストアアプリのため、お手数ですが手動で閉じてください。"
     return f"『{target_name}』に対応するアプリが見つかりませんでした。"
 
 
