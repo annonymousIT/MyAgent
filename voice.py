@@ -144,8 +144,9 @@ def main() -> None:
 
     tools.SHOW_WEATHER_PAGE = False  # 音声モード: 天気は読み上げで届ける（タブを開かない）
 
-    # 相槌を事前合成（VOICEVOX未起動なら空＝相槌なしで動く）
-    fillers = [w for w in (speak_mod._vv_synth(t) for t in FILLER_TEXTS) if w]
+    # 相槌を事前合成（VOICEVOX未起動なら空＝相槌なしで動く）。現在の声設定で合成する。
+    _sp, _pi, _spd = speak_mod._voice_cfg()
+    fillers = [w for w in (speak_mod._vv_synth(t, _sp, _pi, _spd) for t in FILLER_TEXTS) if w]
 
     client = core.build_client()
     persona = core.load_persona() + VOICE_HINT
