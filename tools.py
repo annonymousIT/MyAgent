@@ -404,6 +404,34 @@ def _list_windows() -> str:
     return f"メイン画面: {fw}x{fh}（左上 {fx},{fy}）。表示中のアプリ: {apps}"
 
 
+# 純正タイル（macOS 15+ の Window メニュー）。"Move & Resize" 配下 or トップレベル(Fill)。
+# 自前の座標指定はアプリ最小サイズと喧嘩して隙間が出るが、純正タイルは隙間なしの左右ピッタリ。
+_NATIVE_TILE = {
+    "left": ("Left", "Move & Resize"),
+    "right": ("Right", "Move & Resize"),
+    "maximize": ("Fill", None),  # Fill はトップレベル項目
+}
+
+
+def _native_tile(proc: str, item: str, submenu: "str | None") -> "tuple[bool, str]":
+    """Window メニューの純正タイルを叩く（前面化→メニュー項目クリック）。"""
+    if submenu:
+        click = (
+            f'click menu item "{item}" of menu 1 of menu item "{submenu}" '
+            f'of menu 1 of menu bar item "Window" of menu bar 1'
+        )
+    else:
+        click = f'click menu item "{item}" of menu 1 of menu bar item "Window" of menu bar 1'
+    script = (
+        f'tell application "System Events" to tell process "{proc}"\n'
+        f'  set frontmost to true\n'
+        f'  delay 0.35\n'
+        f'  {click}\n'
+        f'end tell'
+    )
+    return _osa(script)
+
+
 _WINDOW_ACTIONS = {
     "left": "左半分", "右": "right", "左": "left", "right": "right",
     "maximize": "最大化", "最大": "maximize", "最大化": "maximize", "全画面": "maximize",
@@ -431,6 +459,28 @@ def manage_window(action: str, app: str = "") -> str:
     proc = _window_process(app)
     if not proc:
         return "対象のウィンドウが分かりませんでした。"
+    label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
+
+    # ① まず純正タイル（隙間なしの左右ピッタリ／画面いっぱい）。起動直後の競合に備えてリトライ。
+    if act in _NATIVE_TILE:
+        item, submenu = _NATIVE_TILE[act]
+        ok, err = False, ""
+        for _ in range(4):
+            ok, err = _native_tile(proc, item, submenu)
+            if ok or _ax_denied(err):
+                break
+            time.sleep(0.5)
+        if ok:
+            return f"{proc} を{label}に配置しました。"
+        if _ax_denied(err):
+            return (
+                "ウィンドウを動かす権限（アクセシビリティ）が未許可です。"
+                "システム設定 → プライバシーとセキュリティ → アクセシビリティ で、"
+                "この端末（Terminal/iTerm 等）を許可してください。"
+            )
+        # 純正タイルが無い/効かない時は ② 座標方式へフォールバック
+
+    # ② フォールバック（古いOS・純正メニュー非対応アプリ・center）：座標で配置
     fx, fy, fw, fh = _visible_frame()
     if act == "left":
         x, y, w, h = fx, fy, fw // 2, fh
@@ -448,16 +498,13 @@ def manage_window(action: str, app: str = "") -> str:
         f'  set size of window 1 to {{{w}, {h}}}\n'
         f'end tell'
     )
-    # 起動直後はウィンドウがまだ出ておらず失敗することがある（launch→arrangeの競合）。
-    # アクセシビリティ拒否でない限り、少し待って数回リトライする。
     ok, err = False, ""
-    for attempt in range(4):
+    for _ in range(4):
         ok, err = _osa(script)
         if ok or _ax_denied(err):
             break
         time.sleep(0.5)
     if ok:
-        label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
         return f"{proc} のウィンドウを{label}に配置しました。"
     if _ax_denied(err):
         return (
