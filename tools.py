@@ -772,21 +772,34 @@ def manage_window(action: str, app: str = "", monitor: str = "", _relaunched: bo
 
 
 def _close_app_win(name: str = "") -> str:
-    """Windows のアプリ終了（taskkill 経由・win_ops に委譲）。Mac の quit 相当。"""
+    """Windows のアプリ/サイトを閉じる。ウィンドウへ WM_CLOSE（native/UWP/PWA 何でも・安全）を
+    第一手段にし、窓が見つからない native アプリは taskkill でフォールバック。"""
     import win_ops
     target_name = (name or "").strip()
     if not target_name:
         return "何を閉じますか？（アプリ名やサイト名を教えてください）"
-    entry = _resolve_entry(load_config().get("apps", {}), target_name)
+    cfg = load_config()
+    entry = _resolve_entry(cfg.get("apps", {}), target_name)
+
+    # ① タイトル一致のウィンドウを閉じる（種類問わず）。候補＝入力語・表示名・英名・エイリアス・サイト名。
+    cands = [target_name]
+    if isinstance(entry, dict):
+        cands.append(entry.get("name", ""))
+        cands.append(Path(entry.get("exe", "")).stem)
+        cands += entry.get("aliases", []) or []
+    sites = cfg.get("sites", {})
+    if target_name in sites:  # サイト名（PWA/タブのタイトルに出ることが多い）
+        cands.append(target_name)
+    if win_ops.close_window_by_title(cands):
+        return f"{target_name} を閉じました。"
+
+    # ② 窓が見つからない場合：native exe なら taskkill
     exe = entry.get("exe", "") if isinstance(entry, dict) else ""
     if exe and win_ops.close_exe(exe):
         return f"{target_name} を閉じました。"
-    if exe:
+    if entry is not None or target_name in sites:
         return f"{target_name} は開いていないようです。"
-    if isinstance(entry, dict) and entry.get("kind") == "uwp":
-        # ストアアプリは固有 exe を持たず taskkill で閉じられない（誤って別アプリを巻き込まないため触らない）
-        return f"{target_name} はストアアプリのため、お手数ですが手動で閉じてください。"
-    return f"『{target_name}』に対応するアプリが見つかりませんでした。"
+    return f"『{target_name}』に対応するアプリ/サイトが見つかりませんでした。"
 
 
 def close_app(name: str = "") -> str:

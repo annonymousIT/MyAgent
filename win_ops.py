@@ -108,6 +108,50 @@ def close_exe(exe: str) -> bool:
         return False
 
 
+# ブラウザ本体ウィンドウのタイトル末尾。サイト/PWAを閉じる時にこれを巻き込むと全タブが死ぬので除外。
+_BROWSER_SUFFIX = (" - google chrome", " - microsoft edge", " - mozilla firefox",
+                   " - brave", " - opera", " - vivaldi")
+
+
+def close_window_by_title(cands: "list[str]") -> bool:
+    """タイトルに候補語を含む可視ウィンドウへ WM_CLOSE を送る（native/UWP/PWA 問わず閉じられる）。
+
+    exe を持たない UWP/PWA も「窓」は持つので、これで優しく閉じられる（保存確認も出る＝taskkill /F より安全）。
+    日本語2文字（電卓・写真等）も拾えるよう閾値は2。ただしブラウザ本体ウィンドウ（タブの集合）は、
+    明示的にブラウザを閉じたい時以外は巻き込まない（サイトを閉じたつもりで全タブを消さない）。
+    1つでも閉じたら True。
+    """
+    cl = [c.lower() for c in cands if c and len(c) >= 2]
+    if not cl:
+        return False
+    wants_browser = any(b in c for c in cl for b in ("chrome", "edge", "firefox", "brave", "opera"))
+    hits: "list[int]" = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        title = buf.value.lower()
+        if not wants_browser and title.endswith(_BROWSER_SUFFIX):
+            return True  # ブラウザ本体は巻き込まない（PWA独立窓は接尾辞が付かないので対象に残る）
+        if any(c in title for c in cl):
+            hits.append(hwnd)
+        return True
+
+    user32.EnumWindows(_cb, 0)
+    if not hits:
+        return False
+    WM_CLOSE = 0x0010
+    for h in hits:
+        user32.PostMessageW(h, WM_CLOSE, 0, 0)
+    return True
+
+
 # --------------------------------------------------------------------------
 # ウィンドウ配置（ctypes user32）— Mac の純正タイル相当
 # --------------------------------------------------------------------------
