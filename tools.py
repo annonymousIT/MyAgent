@@ -325,6 +325,137 @@ def play_media(query: str, kind: str = "video") -> str:
     return f"YouTube で「{q}」を検索して開きました（残します）。"
 
 
+def _osa(script: str) -> "tuple[bool, str]":
+    """AppleScript を実行。(成功?, 出力or標準エラー) を返す。"""
+    p = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    if p.returncode == 0:
+        return True, p.stdout.strip()
+    return False, (p.stderr or p.stdout).strip()
+
+
+def _ax_denied(err: str) -> bool:
+    """アクセシビリティ未許可のエラーか判定（-1719 / assistive access）。"""
+    e = err.lower()
+    return "-1719" in e or "assistive" in e or "not allowed" in e or "1002" in e
+
+
+def _front_process() -> str:
+    ok, name = _osa('tell application "System Events" to get name of first process whose frontmost is true')
+    return name if ok else ""
+
+
+def _ui_processes() -> "list[str]":
+    """UIを持つ（background only でない）プロセス名の一覧。"""
+    ok, out = _osa('tell application "System Events" to get name of every process whose background only is false')
+    return [p.strip() for p in out.split(",")] if (ok and out) else []
+
+
+def _window_process(app: str) -> str:
+    """app名（表示名/エイリアス）→ 実在する System Events プロセス名に解決。空なら最前面。
+
+    config 解決名（例: Chrome→"Google Chrome"）と実プロセス名のズレを、実在プロセス一覧と
+    突き合わせて吸収する（完全一致→NFC→大小無視→部分一致）。
+    """
+    if not app or not app.strip():
+        return _front_process()
+    target = _resolve_app(load_config().get("apps", {}), app) or app
+    name = Path(target).name
+    if name.endswith(".app"):
+        name = name[:-4]
+    procs = _ui_processes()
+    if not procs:
+        return name
+    cands = {name, app.strip()}  # 解決名と素の入力の両方で当てにいく
+    for c in cands:
+        cn = _nfc(c)
+        for p in procs:  # 完全一致（NFC）
+            if _nfc(p) == cn:
+                return p
+        for p in procs:  # 大小無視
+            if _nfc(p).lower() == cn.lower():
+                return p
+        for p in procs:  # 部分一致（Chrome ⊂ Google Chrome）
+            pl, cl = _nfc(p).lower(), cn.lower()
+            if cl in pl or pl in cl:
+                return p
+    return name
+
+
+def _visible_frame() -> "tuple[int, int, int, int]":
+    """メインディスプレイの可視領域 (x, y, w, h) を近似で返す（メニューバー分を上から除く）。"""
+    ok, out = _osa('tell application "Finder" to get bounds of window of desktop')
+    try:
+        x0, y0, x1, y1 = [int(v) for v in out.replace(" ", "").split(",")]
+    except Exception:
+        x0, y0, x1, y1 = 0, 0, 1440, 900
+    menubar = 25  # メニューバー高さの近似
+    return x0, y0 + menubar, x1 - x0, y1 - y0 - menubar
+
+
+def _list_windows() -> str:
+    fx, fy, fw, fh = _visible_frame()
+    procs = _ui_processes()
+    apps = "、".join(procs) if procs else "(取得失敗)"
+    return f"メイン画面: {fw}x{fh}（左上 {fx},{fy}）。表示中のアプリ: {apps}"
+
+
+_WINDOW_ACTIONS = {
+    "left": "左半分", "右": "right", "左": "left", "right": "right",
+    "maximize": "最大化", "最大": "maximize", "最大化": "maximize", "全画面": "maximize",
+    "center": "中央", "中央": "center", "真ん中": "center", "list": "一覧", "一覧": "list",
+}
+
+
+def manage_window(action: str, app: str = "") -> str:
+    """ウィンドウを配置する（A+D・要アクセシビリティ許可 / #23・ADR-0025）。
+
+    action: left（左半分）/ right（右半分）/ maximize（最大化）/ center（中央）/ list（一覧）。
+    app: 対象アプリ名（省略時は最前面のウィンドウ）。
+    メインディスプレイ前提（マルチモニタ配置は別トラック=Hammerspoon）。
+    """
+    if not IS_MAC:
+        return "ウィンドウ管理はいまの環境では未対応です（Mac のみ）。"
+    raw = (action or "").strip()
+    act = _WINDOW_ACTIONS.get(raw, raw.lower())
+    act = act if act in ("left", "right", "maximize", "center", "list") else raw.lower()
+    if act == "list":
+        return _list_windows()
+    if act not in ("left", "right", "maximize", "center"):
+        return "未対応の操作です（left / right / maximize / center / list）。"
+
+    proc = _window_process(app)
+    if not proc:
+        return "対象のウィンドウが分かりませんでした。"
+    fx, fy, fw, fh = _visible_frame()
+    if act == "left":
+        x, y, w, h = fx, fy, fw // 2, fh
+    elif act == "right":
+        x, y, w, h = fx + fw // 2, fy, fw - fw // 2, fh
+    elif act == "maximize":
+        x, y, w, h = fx, fy, fw, fh
+    else:  # center
+        w, h = int(fw * 0.7), int(fh * 0.8)
+        x, y = fx + (fw - w) // 2, fy + (fh - h) // 2
+
+    script = (
+        f'tell application "System Events" to tell process "{proc}"\n'
+        f'  set position of window 1 to {{{x}, {y}}}\n'
+        f'  set size of window 1 to {{{w}, {h}}}\n'
+        f'end tell'
+    )
+    ok, err = _osa(script)
+    if ok:
+        label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
+        return f"{proc} のウィンドウを{label}に配置しました。"
+    if _ax_denied(err):
+        return (
+            "ウィンドウを動かす権限（アクセシビリティ）が未許可です。"
+            "システム設定 → プライバシーとセキュリティ → アクセシビリティ で、"
+            "この端末（Terminal/iTerm 等）を許可してください。"
+        )
+    return f"{proc} のウィンドウ操作に失敗しました（ウィンドウが無い可能性）。"
+
+
 def close_browser_tabs(urls: "list[str]") -> int:
     """指定URLに一致するブラウザタブを閉じる（ephemeralの後片付け・Mac/Chrome）。
 
@@ -449,6 +580,18 @@ TOOL_DEFS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "manage_window",
+        "description": "ウィンドウを画面に配置する（Macのみ・要アクセシビリティ許可）。「左/右に寄せて」「最大化」「中央に」「ウィンドウ一覧」など。action は left/right/maximize/center/list。app は対象アプリ名（省略時は最前面のウィンドウ）。メインディスプレイ前提。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["left", "right", "maximize", "center", "list"], "description": "配置/操作"},
+                "app": {"type": "string", "description": "対象アプリ名（省略可＝最前面）"},
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 # ツール名 → 実関数
@@ -461,6 +604,7 @@ DISPATCH = {
     "get_weather": get_weather,
     "fetch_page": fetch_page,
     "play_media": play_media,
+    "manage_window": manage_window,
 }
 
 
