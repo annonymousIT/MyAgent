@@ -11,7 +11,6 @@ tkinter のみ（Python標準同梱・追加依存なし）。Windows は透明�
 
 from __future__ import annotations
 
-import math
 import platform
 import threading
 import tkinter as tk
@@ -23,10 +22,12 @@ IS_WINDOWS = platform.system() == "Windows"
 
 CHROMA = "#10121a"       # 透明にする背景色（この色のピクセルが透ける・Windows）
 ORB_CORE = (120, 205, 255)   # orb の芯の色（やわらかい水色）
-SIZE = 170               # ウィンドウの一辺(px)。orb＋脈動の余白
+SIZE = 190               # ウィンドウの一辺(px)。中心の丸＋波紋が広がる余白
 CENTER = SIZE // 2
-BASE_R = 42              # orb の基準半径
-PULSE = 7                # 脈動の振幅(px)
+BASE_R = 34              # 中心の丸の半径（固定・動かない）
+RIPPLE_RANGE = SIZE // 2 - BASE_R - 2   # 波紋が広がりきる距離
+RIPPLE_SPEED = 0.65      # 波紋が広がる速さ(px/frame)
+RIPPLE_EVERY = 26        # 何フレームごとに新しい波紋を落とすか（≈1秒）
 
 # VOICEVOX のよく使う話者プリセット（名前 → speaker id）
 SPEAKERS = {
@@ -76,33 +77,37 @@ class Orb:
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<Button-3>", lambda e: self._quit())  # 右クリックで終了
 
-        self._phase = 0.0
+        self._ripples: list[float] = []   # 各波紋の現在半径
+        self._tick = 0
         self._settings_win = None
         self._animate()
 
-    # ---- アニメーション（ホワンホワン）----
+    # ---- アニメーション（水に物を落とした時のような波紋）----
     def _animate(self) -> None:
-        self._phase += 0.08
-        s = (math.sin(self._phase) + 1) / 2          # 0..1 でゆっくり往復
-        r = BASE_R + PULSE * s                        # 半径が膨らむ/縮む
+        self._tick += 1
+        if self._tick % RIPPLE_EVERY == 0:           # 定期的に新しい波紋を落とす
+            self._ripples.append(float(BASE_R))
+
         self.canvas.delete("all")
-        # 外側のハロー（外ほど CHROMA に溶けて消える＝やわらかい光）
-        rings = 5
-        for i in range(rings, 0, -1):
-            t = i / rings
-            rr = r + t * 26
-            col = _lerp(ORB_CORE, CHROMA_RGB, t)      # 外側ほど透明色へ
-            self.canvas.create_oval(CENTER - rr, CENTER - rr, CENTER + rr, CENTER + rr,
-                                    fill=col, outline="")
-        # 芯（明滅：脈動に合わせて少し明るく）
-        core = _lerp(ORB_CORE, (255, 255, 255), 0.15 + 0.25 * s)
-        self.canvas.create_oval(CENTER - r, CENTER - r, CENTER + r, CENTER + r,
-                                fill=core, outline="")
-        # ハイライト（つやの点）
-        hr = r * 0.28
-        hx, hy = CENTER - r * 0.32, CENTER - r * 0.34
-        self.canvas.create_oval(hx - hr, hy - hr, hx + hr, hy + hr,
-                                fill="#ffffff", outline="")
+
+        # 波紋：中心から外へ広がりながら、外縁ほど CHROMA に溶けて消える（リング＝輪郭線）
+        alive: list[float] = []
+        for r in self._ripples:
+            r += RIPPLE_SPEED
+            prog = (r - BASE_R) / RIPPLE_RANGE       # 0(中心)→1(広がりきり)
+            if prog >= 1.0:
+                continue
+            col = _lerp(ORB_CORE, CHROMA_RGB, prog)  # 広がるほど薄く（透明色へ）
+            w = max(1, int(round(3 * (1 - prog))))   # 外へ行くほど細く
+            self.canvas.create_oval(CENTER - r, CENTER - r, CENTER + r, CENTER + r,
+                                    outline=col, width=w)
+            alive.append(r)
+        self._ripples = alive
+
+        # 中心の丸：固定・反射なし（フラットな水色の円）
+        self.canvas.create_oval(CENTER - BASE_R, CENTER - BASE_R, CENTER + BASE_R, CENTER + BASE_R,
+                                fill=_lerp(ORB_CORE, (255, 255, 255), 0.0), outline="")
+
         self.root.after(40, self._animate)
 
     # ---- ドラッグ／クリック ----

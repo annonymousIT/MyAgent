@@ -584,9 +584,10 @@ _WINDOW_ACTIONS = {
 }
 
 
-def _manage_window_win(action: str, app: str = "") -> str:
+def _manage_window_win(action: str, app: str = "", monitor: str = "") -> str:
     """Windows のウィンドウ配置（ctypes 経由・win_ops に委譲）。Mac の純正タイル相当。
 
+    monitor: "left"/"right"/番号 で配置先モニタを指定（「左の画面にDiscord」）。空なら現在の画面。
     対象アプリが起動していなければ一度起動し、窓ができるのを待ってから配置する（Mac版と同じ自己修復）。
     """
     import win_ops
@@ -607,22 +608,25 @@ def _manage_window_win(action: str, app: str = "") -> str:
             time.sleep(1.3)
 
     label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
-    ok, msg = win_ops.manage_window(act, exe)
+    where = {"left": "左の画面の", "right": "右の画面の"}.get((monitor or "").strip().lower(), "")
+    ok, msg = win_ops.manage_window(act, exe, monitor)
     if ok:
         who = app.strip() if (app and app.strip()) else "最前面のウィンドウ"
-        return f"{who} を{label}に配置しました。"
-    return f"ウィンドウを{label}に配置できませんでした（{msg}）。"
+        return f"{who} を{where}{label}に配置しました。"
+    return f"ウィンドウを{where}{label}に配置できませんでした（{msg}）。"
 
 
-def manage_window(action: str, app: str = "", _relaunched: bool = False) -> str:
+def manage_window(action: str, app: str = "", monitor: str = "", _relaunched: bool = False) -> str:
     """ウィンドウを配置する（A+D・要アクセシビリティ許可 / #23・ADR-0025）。
+
+    monitor: "left"/"right"/番号 で配置先モニタを指定（Windows）。Mac は単一画面前提で無視。
 
     action: left（左半分）/ right（右半分）/ maximize（最大化）/ center（中央）/ list（一覧）。
     app: 対象アプリ名（省略時は最前面のウィンドウ）。対象が開いていなければ自動で起動して並べる。
     メインディスプレイ前提（マルチモニタ配置は別トラック=Hammerspoon）。
     """
     if IS_WINDOWS:
-        return _manage_window_win(action, app)
+        return _manage_window_win(action, app, monitor)
     if not IS_MAC:
         return "ウィンドウ管理はいまの環境では未対応です（Mac / Windows のみ）。"
     raw = (action or "").strip()
@@ -804,6 +808,17 @@ def _app_is_running(target: str) -> bool:
         return False
 
 
+def monitor_count() -> int:
+    """接続モニタ数（プロンプトで『画面は◯枚』と伝えるため）。Windows以外は1とみなす。"""
+    if not IS_WINDOWS:
+        return 1
+    try:
+        import win_ops
+        return win_ops.monitor_count()
+    except Exception:
+        return 1
+
+
 # Claude に渡すツール定義（tool use）
 TOOL_DEFS = [
     {
@@ -852,12 +867,16 @@ TOOL_DEFS = [
     },
     {
         "name": "manage_window",
-        "description": "Tile/place a window (macOS). action = left/right/maximize/center/list. app = target (empty = frontmost).",
+        "description": "Tile/place a window. action = left/right/maximize/center/list (half-screen split / fill / center). "
+                       "app = target (empty = frontmost). monitor = which physical screen on multi-monitor setups: "
+                       "left/right (or a number); empty = current screen. 画面/モニタ/スクリーン words map to monitor, "
+                       "半分/左右の配置 map to action. e.g. 左の画面にDiscord → action=maximize, app=Discord, monitor=left.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["left", "right", "maximize", "center", "list"]},
                 "app": {"type": "string"},
+                "monitor": {"type": "string", "description": "left / right / number / empty(=current screen)"},
             },
             "required": ["action"],
         },

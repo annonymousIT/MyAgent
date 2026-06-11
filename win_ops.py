@@ -112,11 +112,72 @@ def close_exe(exe: str) -> bool:
 # ウィンドウ配置（ctypes user32）— Mac の純正タイル相当
 # --------------------------------------------------------------------------
 def _work_area() -> "tuple[int, int, int, int]":
-    """タスクバーを除いた作業領域 (x, y, w, h)。SystemParametersInfo(SPI_GETWORKAREA)。"""
+    """主モニタのタスクバーを除いた作業領域 (x, y, w, h)。SystemParametersInfo(SPI_GETWORKAREA)。"""
     rect = wintypes.RECT()
     if not user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
         return 0, 0, 1920, 1040
     return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+
+_MONITORINFOF_PRIMARY = 1
+
+
+def _monitors() -> "list[tuple]":
+    """全モニタの作業領域を左→右の順に返す。各要素 (x, y, w, h, is_primary)。"""
+    mons: "list[tuple]" = []
+
+    # コールバック型は Windows 専用（ctypes.WINFUNCTYPE）。ここ（Windows実行時）で定義する。
+    proc_t = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HANDLE, wintypes.HDC,
+        ctypes.POINTER(wintypes.RECT), wintypes.LPARAM,
+    )
+
+    def _cb(hmon, _hdc, _lprc, _lparam):
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        if user32.GetMonitorInfoW(wintypes.HMONITOR(hmon) if hasattr(wintypes, "HMONITOR") else hmon,
+                                  ctypes.byref(mi)):
+            w = mi.rcWork
+            mons.append((w.left, w.top, w.right - w.left, w.bottom - w.top,
+                         bool(mi.dwFlags & _MONITORINFOF_PRIMARY)))
+        return True
+
+    user32.EnumDisplayMonitors(None, None, proc_t(_cb), 0)
+    mons.sort(key=lambda m: m[0])  # x 座標で左→右に並べる
+    return mons
+
+
+def _target_rect(monitor: str) -> "tuple[tuple, bool]":
+    """配置先モニタの作業領域 (x,y,w,h) と「真の最大化を使えるか」を返す。
+
+    monitor 未指定 → 主モニタ＝現在の画面で SW_MAXIMIZE が使える(True)。
+    monitor 指定（左/右/番号）→ そのモニタ矩形に MoveWindow で合わせる(False)。
+    """
+    m = (monitor or "").strip().lower()
+    if not m:
+        return _work_area(), True
+    mons = _monitors()
+    if not mons:
+        return _work_area(), True
+    rects = [(x, y, w, h) for (x, y, w, h, _p) in mons]
+    if m in ("left", "左", "ひだり", "leftmost"):
+        return rects[0], False
+    if m in ("right", "右", "みぎ", "rightmost"):
+        return rects[-1], False
+    if m in ("primary", "主", "メイン", "main"):
+        for (x, y, w, h, p) in mons:
+            if p:
+                return (x, y, w, h), False
+        return rects[0], False
+    if m.isdigit():
+        i = int(m) - 1
+        return (rects[i] if 0 <= i < len(rects) else rects[0]), False
+    return _work_area(), True
 
 
 def _exe_of_pid(pid: int) -> str:
@@ -158,13 +219,16 @@ def _find_window_by_exe(exe: str) -> "int | None":
     return found[0] if found else None
 
 
-def _place(hwnd: int, action: str) -> None:
-    """ウィンドウを左半分 / 右半分 / 最大化 / 中央 に配置する。"""
+def _place(hwnd: int, action: str, rect: tuple, true_maximize: bool) -> None:
+    """ウィンドウを rect（配置先モニタの作業領域）の左半分/右半分/最大化/中央に配置する。"""
     user32.ShowWindow(hwnd, SW_RESTORE)  # 最大化状態だと座標指定が効かないので一旦戻す
+    x, y, w, h = rect
     if action == "maximize":
-        user32.ShowWindow(hwnd, SW_MAXIMIZE)
+        if true_maximize:                       # 同一モニタ内ならOSの最大化（隙間なし）
+            user32.ShowWindow(hwnd, SW_MAXIMIZE)
+        else:                                   # 別モニタ指定はそのモニタの作業領域いっぱいに移動
+            user32.MoveWindow(hwnd, x, y, w, h, True)
         return
-    x, y, w, h = _work_area()
     if action == "left":
         rx, ry, rw, rh = x, y, w // 2, h
     elif action == "right":
@@ -175,12 +239,12 @@ def _place(hwnd: int, action: str) -> None:
     user32.MoveWindow(hwnd, rx, ry, rw, rh, True)
 
 
-def manage_window(action: str, exe: str = "") -> "tuple[bool, str]":
+def manage_window(action: str, exe: str = "", monitor: str = "") -> "tuple[bool, str]":
     """ウィンドウ配置。exe 指定があればそのアプリの窓、無ければ最前面の窓を動かす。
 
-    返り値 (成功?, メッセージ)。tools.manage_window から委譲される。
-    起動直後はアプリが窓を生成するまで時間差があるため、exe 指定時は数回リトライして待つ
-    （Win11 のメモ帳など窓生成が遅いアプリ対策。Mac 版のリトライと同趣旨）。
+    monitor: "" なら現在の画面（OS最大化が使える）。"left"/"right"/番号 なら、そのモニタの
+    作業領域に対して action（左半分/右半分/最大化/中央）を適用する＝「左の画面にDiscord」が通る。
+    起動直後は窓生成に時間差があるため、exe 指定時は数回リトライして待つ（Mac版と同趣旨）。
     """
     hwnd = None
     if exe:
@@ -194,7 +258,16 @@ def manage_window(action: str, exe: str = "") -> "tuple[bool, str]":
     if not hwnd:
         return False, "対象のウィンドウが見つかりませんでした（起動済みか確認してください）。"
     try:
-        _place(hwnd, action)
+        rect, true_max = _target_rect(monitor)
+        _place(hwnd, action, rect, true_max)
         return True, "ok"
     except Exception as e:  # ctypes 例外でも本体を止めない
         return False, f"{type(e).__name__}: {e}"
+
+
+def monitor_count() -> int:
+    """接続モニタ数（プロンプトで『画面は2枚』と伝えるため）。"""
+    try:
+        return len(_monitors())
+    except Exception:
+        return 1

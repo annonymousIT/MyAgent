@@ -95,6 +95,10 @@ def static_menu() -> str:
         "(never confuse with system ops like モニタ消す; if context says an app was just opened, close that one).\n"
         "- Window (左/右/最大化/中央) -> manage_window. For requests like 'A左、B右', launch any missing app first, "
         "then place both — complete launch+placement in one turn.\n"
+        "- Multi-monitor: words like 画面/モニタ/スクリーン (左の画面/右のモニタ/2番目の画面) set manage_window's "
+        "'monitor' (left/right/number); 半分や左右寄せ such as 左半分 set 'action'. '左の画面にDiscord' = "
+        "manage_window(action=maximize, app=Discord, monitor=left). '右画面の左半分にChrome' = "
+        "manage_window(action=left, app=Chrome, monitor=right). With one monitor, ignore monitor.\n"
         "- Remember/schedule/forget per the hard rules above.\n"
         "- Pure greetings/small talk (おはよ etc.): no tools; reply in character, weaving in a caring note from "
         "memory or upcoming schedule when natural.\n"
@@ -129,8 +133,10 @@ def static_menu() -> str:
 def volatile_context() -> str:
     """Per-turn changing part (not cached): current time/profile/schedule + running apps."""
     running = "、".join(tools.running_apps()) or "(none)"
+    n_mon = tools.monitor_count()
     return (
         profile_store.context_text() + "\n"
+        f"[Monitors]: {n_mon}（{'複数画面あり。左/右の画面指定が有効' if n_mon > 1 else '単一画面。monitor指定は無視'}）\n"
         f"[Running apps now]: {running}\n"
         "These are the apps open right now — judge from this. Not listed = closed. "
         "Chrome PWAs (YouTube/Gmail/moodle) don't appear here, so if unsure just launch_app "
