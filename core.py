@@ -12,6 +12,14 @@ import json
 import os
 from pathlib import Path
 
+# 企業/学校などTLS傍受プロキシ下でも、Python が OS の証明書ストア（Windowsの信頼ストア等）を
+# 使えるようにする。これが無いと certifi 同梱CAにプロキシのCAが無く SSL 検証に失敗する。
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 import anthropic
 
 import profile_store

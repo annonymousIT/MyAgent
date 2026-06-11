@@ -195,7 +195,9 @@ def context_text(now: "datetime.datetime | None" = None) -> str:
     # Date map (this/next/week-after, with weekday). Resolve 来週の月曜 etc. by lookup, never compute.
     def _fmt(d):
         rel = "今日" if d == today else ("明日" if d == today + datetime.timedelta(days=1) else "")
-        return f"{rel}{d.strftime('%-m/%-d')}({_WD_JA[d.weekday()]})"
+        # %-m/%-d（ゼロ埋め無し）は Linux/Mac 専用で Windows の strftime では落ちる。
+        # 月日は直接組んで OS 非依存にする。
+        return f"{rel}{d.month}/{d.day}({_WD_JA[d.weekday()]})"
     monday = today - datetime.timedelta(days=today.weekday())
     weeks = []
     for wi, wlabel in enumerate(("今週", "来週", "再来週")):
