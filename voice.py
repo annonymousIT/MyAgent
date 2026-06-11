@@ -229,55 +229,60 @@ def main() -> None:
 
             front = tools._front_process() if speak_mod.IS_MAC else ""
 
-            # ストリーミング＋合成先回り（#34）：LLMは文ができた端から sent_q へ。合成スレッドが
-            # 各文を WAV 化して wav_q へ（＝次の文を裏で合成）。メインは出来た WAV を順に再生する。
-            # → 1文目を喋っている間に2文目を合成済みにでき、文と文の“間”が消える（ブツ切り解消）。
+            # ストリーミング＋並列合成（#34）：LLMが文（読点で細かく刻まれる）を出すたび、その場で
+            # 専用スレッドが合成を開始する＝全チャンクを“同時並行”で合成。再生は順番どおり。
+            # VOICEVOX(CPU)は合成が再生より遅いが、並列に走らせれば次チャンクが先に出来て間が消える。
             _vcfg = speak_mod._voice_cfg()
-            sent_q: "queue.Queue" = queue.Queue()
-            wav_q: "queue.Queue" = queue.Queue()
+            slots: list = []                  # 各チャンクの {ev, wav, text}（出現順＝再生順）
+            slots_lock = threading.Lock()
             box: dict = {}
+            done = threading.Event()
+
+            def _on_sentence(s: str) -> None:
+                slot = {"ev": threading.Event(), "wav": None, "text": s}
+                with slots_lock:
+                    slots.append(slot)
+
+                def _synth() -> None:         # チャンクごとに独立スレッドで合成（並列）
+                    cleaned = speak_mod.clean_for_speech(s)
+                    slot["wav"] = speak_mod._vv_synth(cleaned, *_vcfg) if cleaned else None
+                    slot["ev"].set()
+                threading.Thread(target=_synth, daemon=True).start()
 
             def _work() -> None:
                 try:
                     box["r"] = core.run_turn(client, persona, text, dry_run=False,
-                                             history=history, on_sentence=sent_q.put)
+                                             history=history, on_sentence=_on_sentence)
                 except Exception as e:  # noqa: BLE001
                     box["e"] = e
                 finally:
-                    sent_q.put(None)
-
-            def _synth() -> None:                         # 文を先回りで合成し続ける
-                while True:
-                    s = sent_q.get()
-                    if s is None:
-                        break
-                    cleaned = speak_mod.clean_for_speech(s)
-                    wav = speak_mod._vv_synth(cleaned, *_vcfg) if cleaned else None
-                    wav_q.put((s, wav))
-                wav_q.put(None)
+                    done.set()
 
             threading.Thread(target=_work, daemon=True).start()
-            threading.Thread(target=_synth, daemon=True).start()
 
             spoke_any = False
+            i = 0
             first = True
             while True:
-                try:
-                    item = wav_q.get(timeout=FILLER_AFTER) if first else wav_q.get()
-                except queue.Empty:
-                    if fillers:                           # 最初の音が0.9秒で来なければ相槌で間を埋める
+                with slots_lock:
+                    slot = slots[i] if i < len(slots) else None
+                if slot is None:
+                    if done.is_set():
+                        break              # 全チャンク再生済み
+                    time.sleep(0.02)
+                    continue
+                if first:                  # 最初のチャンクが0.9秒で合成されなければ相槌で間を埋める
+                    if not slot["ev"].wait(FILLER_AFTER) and fillers:
                         speak_mod._play_wav(random.choice(fillers))
-                    item = wav_q.get()
-                first = False
-                if item is None:
-                    break
-                s, wav = item
-                if wav:                                   # 合成済み → 即再生（合成待ちゼロ＝なめらか）
-                    speak_mod._play_wav(wav)
+                    first = False
+                slot["ev"].wait()          # このチャンクの合成完了を待つ（裏で次も合成中）
+                if slot["wav"]:
+                    speak_mod._play_wav(slot["wav"])
                     spoke_any = True
-                elif s:                                   # 合成失敗（エンジン落ち等）→ OS音声でフォールバック
-                    speak_mod.speak(s, block=True)
+                elif slot["text"]:         # 合成失敗（エンジン落ち等）→ OS音声でフォールバック
+                    speak_mod.speak(slot["text"], block=True)
                     spoke_any = True
+                i += 1
 
             if "e" in box:
                 raise box["e"]

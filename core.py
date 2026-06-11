@@ -314,17 +314,19 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     # ストリーミング発声（#34）。最終応答を文単位で on_sentence へ流す。
     streamed = {"text": "", "first_done": False}  # 発声済み本文＋最初のチャンクを出したか
     _SENT_END = re.compile(r"[。！？!?\n]")
-    _FIRST_END = re.compile(r"[。！？!?\n、,]")
-    _MIN_FIRST = 8  # 最初のチャンクを読点で切る最小長（短すぎる「あ、」等を1人で喋らせない）
+    _ANY_END = re.compile(r"[。！？!?\n、,]")
+    _MIN_CHUNK = 8  # 読点で切る最小長（短い「あ、」は単独で喋らせず句点まで待つ）
 
     def _break(text: str):
-        """次の発声区切り位置の match を返す。最初のチャンクだけは『十分な長さの読点』でも切る
-        （「おはようございます、」で即合成＝声出しが早い／「あ、」のような短断片は句点まで待つ）。"""
-        if streamed["first_done"]:
-            return _SENT_END.search(text)
-        m = _FIRST_END.search(text)
-        if m and text[m.start()] in "、," and len(text[:m.end()].strip()) < _MIN_FIRST:
-            return _SENT_END.search(text)  # 読点だが短い → 句点まで待つ
+        """次の発声区切り位置の match を返す。句点では常に切り、読点では『十分な長さ』の時だけ切る。
+
+        長い文も読点で小さく刻む → 1チャンクの VOICEVOX 合成が速く、最初の声出しが早い＆
+        裏で並列合成すれば途切れない。短い読点断片は不自然なので句点まで待つ。"""
+        m = _ANY_END.search(text)
+        if not m:
+            return None
+        if text[m.start()] in "、," and len(text[:m.end()].strip()) < _MIN_CHUNK:
+            return _SENT_END.search(text)  # 読点だが短い → 句点まで待つ（無ければ None）
         return m
 
     def _emit(buf: dict) -> None:
