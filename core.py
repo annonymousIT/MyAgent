@@ -315,7 +315,8 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     streamed = {"text": "", "first_done": False}  # 発声済み本文＋最初のチャンクを出したか
     _SENT_END = re.compile(r"[。！？!?\n]")
     _ANY_END = re.compile(r"[。！？!?\n、,]")
-    _MIN_CHUNK = 8  # 読点で切る最小長（短い「あ、」は単独で喋らせず句点まで待つ）
+    _MIN_CHUNK = 14  # 読点で切る最小長。GPU合成は一瞬(~0.2s)なので無理に刻まず、長文だけ分割して
+    #                  抑揚を自然に保つ（短〜中文は丸ごと1チャンク）。CPU合成時は小さめが有利だった。
 
     def _break(text: str):
         """次の発声区切り位置の match を返す。句点では常に切り、読点では『十分な長さ』の時だけ切る。
