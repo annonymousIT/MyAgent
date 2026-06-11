@@ -94,8 +94,25 @@ def _voicevox_speak(text: str) -> bool:
                 pass
 
 
+# say(Kyoko)が誤読しやすい語の読み補正（say経路のみ。VOICEVOXは自前辞書が優秀なので適用しない）。
+# 文脈で読みを選べないKyokoの応急処置。網羅は無理なので、出やすいものだけ。VOICEVOX導入が本命。
+_SAY_READING = {
+    "失く": "なく",      # 失くす→×しつく
+    "要ら": "いら", "要る": "いる", "要り": "いり",  # 要らない→×かなめら（必要/重要は別表記なので無害）
+    "茨木": "いばらき",  # 地名
+    "塾": "じゅく",
+}
+
+
+def _say_reading_fixes(text: str) -> str:
+    for k, v in _SAY_READING.items():
+        text = text.replace(k, v)
+    return text
+
+
 def _say_pauses(text: str) -> str:
     """say は句読点をほぼ素通りするので、文末・読点に無音([[slnc ms]])を挿し込んで間を作る。"""
+    text = _say_reading_fixes(text)
     text = re.sub(r"([。！？!?])", r"\1[[slnc 380]]", text)
     text = re.sub(r"([、,])", r"\1[[slnc 130]]", text)
     return text
