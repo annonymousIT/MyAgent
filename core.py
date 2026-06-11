@@ -1,0 +1,110 @@
+"""MyAgent のコア処理（UIから分離）。
+
+agent.py / web.py の両方から使える「APIキー読み込み・人格読み込み・1ターン処理」をまとめた層。
+UI（ターミナル / ブラウザ）が変わっても、ここは無変更で使い回せる。
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import anthropic
+
+import tools
+
+MODEL = "claude-haiku-4-5"
+BASE = Path(__file__).parent
+PERSONA_PATH = BASE / "persona.txt"
+ENV_PATH = BASE / ".env"
+
+
+def load_api_key() -> "str | None":
+    """環境変数を優先。無ければ .env から ANTHROPIC_API_KEY を拾う。"""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if "ANTHROPIC_API_KEY" in line and "=" in line:
+                val = line.split("=", 1)[1].strip()
+                return val.strip('"').strip("'")
+    return None
+
+
+def load_persona() -> str:
+    return PERSONA_PATH.read_text(encoding="utf-8").strip()
+
+
+def build_client() -> anthropic.Anthropic:
+    key = load_api_key()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY が見つかりません（環境変数か .env を確認）。")
+    return anthropic.Anthropic(api_key=key)
+
+
+def _text_of(response) -> str:
+    parts = [b.text for b in response.content if b.type == "text"]
+    return "".join(parts).strip() or "（…）"
+
+
+def available_operations() -> str:
+    """②材料：現在のconfigから「いま実行できる操作の名前候補」を組み立てる。
+
+    これをシステムプロンプトに同梱することで、モデルが自分に何ができるかを把握し、
+    曖昧な指示の解釈・候補が複数のときの聞き返し・無い操作の正直な拒否ができるようになる。
+    """
+    cfg = tools.load_config()
+    sites = "、".join(cfg.get("sites", {}).keys())
+    apps = "、".join(cfg.get("apps", {}).keys())
+    system = "、".join(list(cfg.get("system", {}).keys()) + list(cfg.get("dangerous_system", {}).keys()))
+    return (
+        "【いま利用可能な操作（この一覧の名前しか実行できません。無いものは正直に「用意がない」と答える）】\n"
+        f"・open_site の name 候補: {sites}\n"
+        f"・launch_app の name 候補: {apps}\n"
+        f"・run_system の name 候補: {system}"
+    )
+
+
+def build_system_prompt(persona: str) -> str:
+    return persona + "\n\n" + available_operations()
+
+
+def run_turn(client, persona: str, user_input: str, dry_run: bool = False) -> dict:
+    """1ターン処理。{"actions": [...], "reply": "..."} を返す。
+
+    dry_run=True なら open_site / launch_app / run_system を実際には実行せず、
+    どのツールが選ばれたかと返答だけを返す（公共の場での確認用）。
+    """
+    actions = []
+    system_prompt = build_system_prompt(persona)  # 人格 ＋ ②材料（利用可能な操作一覧）
+    messages = [{"role": "user", "content": user_input}]
+
+    response = client.messages.create(
+        model=MODEL, max_tokens=300, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
+    )
+
+    if response.stop_reason != "tool_use":
+        return {"actions": actions, "reply": _text_of(response)}
+
+    messages.append({"role": "assistant", "content": response.content})
+    tool_results = []
+    for block in response.content:
+        if block.type == "tool_use":
+            label = f"{block.name}({block.input})"
+            if dry_run:
+                result = "（ドライラン：実際には実行していません）"
+                actions.append({"kind": "dry", "label": label, "result": result})
+            else:
+                result = tools.run_tool(block.name, block.input)
+                actions.append({"kind": "run", "label": label, "result": result})
+            tool_results.append(
+                {"type": "tool_result", "tool_use_id": block.id, "content": result}
+            )
+    messages.append({"role": "user", "content": tool_results})
+
+    final = client.messages.create(
+        model=MODEL, max_tokens=300, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
+    )
+    return {"actions": actions, "reply": _text_of(final)}
