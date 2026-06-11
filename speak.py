@@ -31,8 +31,10 @@ IS_WINDOWS = platform.system() == "Windows"
 VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://127.0.0.1:50021").rstrip("/")
 # 既定 8=春日部つむぎ(ノーマル)。ユーザー選定(2026-06-11)。env VOICEVOX_SPEAKER で上書き可。
 VOICEVOX_SPEAKER = os.environ.get("VOICEVOX_SPEAKER", "8")
-# 音高（トーン）。0.0=既定、負で下げる。少し低めに（落ち着いた印象）。env VOICEVOX_PITCH で調整可。
-VOICEVOX_PITCH = float(os.environ.get("VOICEVOX_PITCH", "-0.04"))
+# 音高（トーン）。0.0=既定、負で下げる。割と低めに（落ち着いた印象）。env VOICEVOX_PITCH で調整可。
+VOICEVOX_PITCH = float(os.environ.get("VOICEVOX_PITCH", "-0.085"))
+# 話速。1.0=既定、小さいほど遅い。ほんの少しだけ遅く。env VOICEVOX_SPEED で調整可。
+VOICEVOX_SPEED = float(os.environ.get("VOICEVOX_SPEED", "0.95"))
 
 # `say` 用の日本語ボイス（VOICEVOX未導入時のフォールバック）。英語ボイスだと日本語＝記号読みになる。
 SAY_VOICE = os.environ.get("SAY_VOICE", "Kyoko")
@@ -62,7 +64,8 @@ def _voicevox_speak(text: str) -> bool:
         q = urllib.parse.urlencode({"text": text, "speaker": VOICEVOX_SPEAKER})
         req = urllib.request.Request(f"{VOICEVOX_URL}/audio_query?{q}", method="POST")
         query = json.loads(urllib.request.urlopen(req, timeout=2).read())
-        query["pitchScale"] = VOICEVOX_PITCH  # トーンを少し下げる
+        query["pitchScale"] = VOICEVOX_PITCH  # トーンを下げる
+        query["speedScale"] = VOICEVOX_SPEED  # 話速をほんの少し遅く
         # 2) クエリ → WAV
         req2 = urllib.request.Request(
             f"{VOICEVOX_URL}/synthesis?speaker={VOICEVOX_SPEAKER}",
