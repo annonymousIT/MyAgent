@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -28,9 +29,10 @@ IS_MAC = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
 VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://127.0.0.1:50021").rstrip("/")
-# 既定 14=冥鳴ひまり(ノーマル)。ユーザー選定(2026-06-11)。落ち着いた声でちょい毒舌世話焼きに合う。
-# 変えたいときは環境変数 VOICEVOX_SPEAKER で（例: 6=四国めたん ツンツン, 9=波音リツ クール）。
-VOICEVOX_SPEAKER = os.environ.get("VOICEVOX_SPEAKER", "14")
+# 既定 8=春日部つむぎ(ノーマル)。ユーザー選定(2026-06-11)。env VOICEVOX_SPEAKER で上書き可。
+VOICEVOX_SPEAKER = os.environ.get("VOICEVOX_SPEAKER", "8")
+# 音高（トーン）。0.0=既定、負で下げる。少し低めに（落ち着いた印象）。env VOICEVOX_PITCH で調整可。
+VOICEVOX_PITCH = float(os.environ.get("VOICEVOX_PITCH", "-0.04"))
 
 # `say` 用の日本語ボイス（VOICEVOX未導入時のフォールバック）。英語ボイスだと日本語＝記号読みになる。
 SAY_VOICE = os.environ.get("SAY_VOICE", "Kyoko")
@@ -59,11 +61,12 @@ def _voicevox_speak(text: str) -> bool:
         # 1) テキスト → 音声合成用クエリ（接続拒否ならここで即例外＝待たない）
         q = urllib.parse.urlencode({"text": text, "speaker": VOICEVOX_SPEAKER})
         req = urllib.request.Request(f"{VOICEVOX_URL}/audio_query?{q}", method="POST")
-        query = urllib.request.urlopen(req, timeout=2).read()
+        query = json.loads(urllib.request.urlopen(req, timeout=2).read())
+        query["pitchScale"] = VOICEVOX_PITCH  # トーンを少し下げる
         # 2) クエリ → WAV
         req2 = urllib.request.Request(
             f"{VOICEVOX_URL}/synthesis?speaker={VOICEVOX_SPEAKER}",
-            data=query,
+            data=json.dumps(query).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
