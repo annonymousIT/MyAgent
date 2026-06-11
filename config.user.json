@@ -17,6 +17,8 @@
   "system": {
     "音量下げる": "osascript -e 'set volume output volume 25'",
     "音量上げる": "osascript -e 'set volume output volume 70'",
+    "ミュート": "osascript -e 'set volume output muted true'",
+    "ミュート解除": "osascript -e 'set volume output muted false'",
     "モニタ消す": "pmset displaysleepnow"
   },
 

@@ -74,14 +74,17 @@ def available_operations() -> str:
     apps = "、".join(_app_label(name, entry) for name, entry in cfg.get("apps", {}).items())
     system = "、".join(list(cfg.get("system", {}).keys()) + list(cfg.get("dangerous_system", {}).keys()))
     return (
-        "【いまPCで実行できること】\n"
+        "【いまPCで実行できること（使うツール）】\n"
         "・サイトとアプリで同名が両方ある時はアプリ(専用ウィンドウ)を優先します。\n"
-        f"・open_site の name 候補: {sites}\n"
-        f"・launch_app の name 候補（カッコ内は呼び名・略語、それでも引けます）: {apps}\n"
-        f"・run_system の name 候補: {system}\n"
-        "・上の一覧に無い情報・調べもの（天気/株価/ニュース等）や『〜どう？/調べて/教えて』は、"
-        "web_search（または open_url）で答えを届ける。アプリを開くだけで終わらせない。"
-        "本当にPCで不可能なことだけ正直に断る（答えを想像で捏造しない）。"
+        f"・open_site（サイトを開く）の name 候補: {sites}\n"
+        f"・launch_app（アプリ起動）の name 候補（カッコ内は呼び名・略語、それでも引けます）: {apps}\n"
+        f"・run_system（システム操作）の name 候補: {system}\n"
+        "・close_app（閉じる）: 開いたアプリ/サイトを閉じる。『〜閉じて/消して/やめて』はこれ（システム操作と混同しない）。\n"
+        "・get_weather（天気）: 『天気どう？』は必ずこれで実データを取り、要約して伝える（web_searchではない）。\n"
+        "・play_media（動画/音楽）: 『〜の動画見たい/流して/聴きたい』。開いて残す。\n"
+        "・manage_window（ウィンドウ配置）: 『左/右に寄せて・最大化・中央・一覧』。\n"
+        "・fetch_page（ページ本文取得）/ web_search（検索）/ open_url（URLを開く）: 上記に無い調べもの（株価/ニュース/事実確認等）や『調べて/教えて』に実ソースで答える。\n"
+        "・アプリや検索を開くだけで終わらせず、取得した実データを根拠に答える。本当にPCで不可能なことだけ正直に断る（捏造しない）。"
     )
 
 
@@ -131,10 +134,12 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
             label = f"{block.name}({block.input})"
             if dry_run:
                 result = "（ドライラン：実際には実行していません）"
-                actions.append({"kind": "dry", "label": label, "result": result})
+                actions.append({"kind": "dry", "label": label, "result": result,
+                                "tool": block.name, "input": block.input})
             else:
                 result = tools.run_tool(block.name, block.input)
-                actions.append({"kind": "run", "label": label, "result": result})
+                actions.append({"kind": "run", "label": label, "result": result,
+                                "tool": block.name, "input": block.input})
             tool_results.append(
                 {"type": "tool_result", "tool_use_id": block.id, "content": result}
             )
@@ -148,4 +153,7 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     final = client.messages.create(
         model=MODEL, max_tokens=300, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
     )
-    return _finish(_text_of(final))
+    reply = _text_of(final)
+    if reply == "（…）" and actions:  # 実行後にモデルが何も言わなかった時の保険：ツール結果を返答に使う
+        reply = actions[-1]["result"]
+    return _finish(reply)

@@ -60,6 +60,14 @@ PAGE = """<!doctype html>
     align-self:flex-start;font-size:12.5px;color:var(--accent);background:rgba(245,185,69,.08);
     border:1px solid rgba(245,185,69,.25);padding:6px 11px;border-radius:10px;font-family:ui-monospace,Menlo,monospace;
   }
+  .judge{align-self:flex-start;max-width:88%;margin-top:-4px;display:flex;flex-direction:column;gap:6px}
+  .jrow{background:rgba(245,185,69,.06);border:1px solid rgba(245,185,69,.22);border-left:3px solid var(--accent);
+    border-radius:10px;padding:8px 11px;font-size:12.5px;color:var(--text)}
+  .jhead{margin-bottom:3px}
+  .jhead b{color:var(--accent)}
+  .jmode{float:right;color:var(--muted);font-size:11.5px}
+  .jline{color:var(--muted);line-height:1.5;word-break:break-word}
+  .jline code{font-family:ui-monospace,Menlo,monospace;color:#cdd5e2;background:rgba(255,255,255,.04);padding:1px 5px;border-radius:5px}
   .typing{display:flex;gap:4px;padding:12px 15px;background:var(--bot);border:1px solid var(--line);border-radius:16px;border-bottom-left-radius:5px}
   .typing span{width:7px;height:7px;border-radius:50%;background:var(--muted);animation:b 1.2s infinite}
   .typing span:nth-child(2){animation-delay:.2s}.typing span:nth-child(3){animation-delay:.4s}
@@ -84,7 +92,7 @@ PAGE = """<!doctype html>
     <header>
       <span class="dot"></span>
       <h1>MyAgent — 動作確認</h1>
-      <span class="sub">テキスト入力・無音</span>
+      <span class="sub">テキスト入力（音声の代わり）</span>
     </header>
     <div class="log" id="log"></div>
     <div class="composer">
@@ -92,7 +100,7 @@ PAGE = """<!doctype html>
         <input id="msg" placeholder="話しかける（例：github開いて / 課題見よ / おはよ）" autocomplete="off" autofocus>
         <button id="send">送信</button>
       </div>
-      <label class="opt"><input type="checkbox" id="dry" checked> ドライラン（実際には開かず、選ばれたツールと返答だけ確認）</label>
+      <label class="opt"><input type="checkbox" id="dry" checked> ドライラン（ON=実行せず判断だけ確認 / OFFで実際に実行）</label>
       <label class="opt"><input type="checkbox" id="aloud"> 読み上げ（返答を音声で。VOICEVOX起動中ならVOICEVOX、無ければOS標準）</label>
     </div>
   </div>
@@ -109,10 +117,29 @@ function bubble(who,text){
   const b=el('bubble'); b.textContent=text; row.appendChild(b);
   log.appendChild(row); log.scrollTop=log.scrollHeight;
 }
-function action(a){
-  const icon = a.kind==='dry' ? '🔍 選択' : '⚙ 実行';
-  const r=el('action'); r.textContent=`${icon}: ${a.label}` + (a.kind==='run'?` → ${a.result}`:'');
-  log.appendChild(r); log.scrollTop=log.scrollHeight;
+const TOOLJP={
+  open_site:'サイトを開く', launch_app:'アプリを起動', run_system:'システム操作',
+  close_app:'閉じる', get_weather:'天気を取得', play_media:'動画/音楽を開く',
+  manage_window:'ウィンドウ配置', fetch_page:'ページ本文を取得', web_search:'Web検索', open_url:'URLを開く'
+};
+// 吹き出しの下に「どう判断して・何を実行したか」を出す（テスト用ログ）
+function judge(actions){
+  const box=el('judge');
+  if(!actions||!actions.length){
+    const r=el('jrow'); r.innerHTML='<div class="jhead">🧠 判断: <b>操作なし</b> <span class="jmode">会話で対応</span></div>';
+    box.appendChild(r); log.appendChild(box); log.scrollTop=log.scrollHeight; return;
+  }
+  actions.forEach(a=>{
+    const jp=TOOLJP[a.tool]||a.tool||'—';
+    const mode=a.kind==='dry'?'🔍 ドライ（実行せず）':'⚙ 実行';
+    const args=a.input?JSON.stringify(a.input):'';
+    const r=el('jrow');
+    r.innerHTML=`<div class="jhead">🧠 判断: <b>${esc(jp)}</b> <span class="jmode">${mode}</span></div>`
+      +`<div class="jline">動作: <code>${esc((a.tool||'')+args)}</code></div>`
+      +`<div class="jline">結果: ${esc(a.result||'')}</div>`;
+    box.appendChild(r);
+  });
+  log.appendChild(box); log.scrollTop=log.scrollHeight;
 }
 let typingEl=null;
 function showTyping(){typingEl=el('typing','<span></span><span></span><span></span>');log.appendChild(typingEl);log.scrollTop=log.scrollHeight}
@@ -128,7 +155,7 @@ async function send(){
     const data=await res.json();
     hideTyping();
     if(data.error){ bubble('bot','⚠ エラー: '+data.error); }
-    else{ (data.actions||[]).forEach(action); bubble('bot', data.reply); }
+    else{ bubble('bot', data.reply); judge(data.actions); }  // 吹き出し→その下に判断ログ
   }catch(e){ hideTyping(); bubble('bot','⚠ 通信エラー: '+e); }
   btn.disabled=false; input.disabled=false; input.focus();
 }

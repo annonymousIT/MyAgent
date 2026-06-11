@@ -17,6 +17,7 @@ import json
 import platform
 import re
 import subprocess
+import sys
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -202,6 +203,9 @@ def run_system(name: str) -> str:
 
     if name in dangerous:
         # 危険操作は即実行せず確認を挟む（自律性の制限：暴走防止）
+        # Web UI 等の非対話環境では input() がサーバを固めるため、実行せず確認を促す
+        if not sys.stdin or not sys.stdin.isatty():
+            return f"『{name}』は危険な操作です。安全のため、この画面からは実行しません（ターミナルから操作してください）。"
         ans = input(f"⚠ 『{name}』は危険な操作です。実行しますか？ [y/N] ").strip().lower()
         if ans == "y":
             subprocess.run(dangerous[name], shell=True, check=False)
@@ -456,6 +460,39 @@ def manage_window(action: str, app: str = "") -> str:
     return f"{proc} のウィンドウ操作に失敗しました（ウィンドウが無い可能性）。"
 
 
+def close_app(name: str = "") -> str:
+    """開いているアプリ／サイトを閉じる（「YouTube閉じて」「Discordやめて」等）。
+
+    - サイトとして開いているタブ → 該当URLのタブを閉じる
+    - アプリ → quit（PWA/native とも）
+    『閉じる/消す/やめる』の動詞をここで正しく受ける（モニタ消す等の誤爆防止）。
+    """
+    if not IS_MAC:
+        return "閉じる操作はいまの環境では未対応です（Mac のみ）。"
+    target_name = (name or "").strip()
+    if not target_name:
+        return "何を閉じますか？（アプリ名やサイト名を教えてください）"
+    cfg = load_config()
+    # 1) サイトとして開いているタブを閉じる
+    sites = cfg.get("sites", {})
+    url = sites.get(target_name) or sites.get(target_name.lower())
+    if url and close_browser_tabs([url]):
+        return f"{target_name} のタブを閉じました。"
+    # 2) アプリとして quit
+    resolved = _resolve_app(cfg.get("apps", {}), target_name)
+    if resolved:
+        appname = Path(resolved).name
+        if appname.endswith(".app"):
+            appname = appname[:-4]
+        ok, _ = _osa(f'tell application "{appname}" to quit')
+        if ok:
+            return f"{appname} を閉じました。"
+        return f"{target_name} を閉じられませんでした。"
+    if url:
+        return f"{target_name} は開いていないようです。"
+    return f"『{target_name}』に対応するアプリ/サイトが見つかりませんでした。"
+
+
 def close_browser_tabs(urls: "list[str]") -> int:
     """指定URLに一致するブラウザタブを閉じる（ephemeralの後片付け・Mac/Chrome）。
 
@@ -592,6 +629,15 @@ TOOL_DEFS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "close_app",
+        "description": "開いているアプリやサイトを閉じる。「〜閉じて」「〜消して」「〜やめて」「もういい」などウィンドウ/アプリを閉じたい時に使う。name は閉じる対象（アプリ名・サイト名）。直前に開いたものを閉じる文脈なら、その名前を入れる。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "閉じる対象のアプリ名・サイト名"}},
+            "required": ["name"],
+        },
+    },
 ]
 
 # ツール名 → 実関数
@@ -605,6 +651,7 @@ DISPATCH = {
     "fetch_page": fetch_page,
     "play_media": play_media,
     "manage_window": manage_window,
+    "close_app": close_app,
 }
 
 
