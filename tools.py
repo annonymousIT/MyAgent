@@ -381,9 +381,9 @@ def remember(fact: str) -> str:
     return profile_store.remember(fact)
 
 
-def add_schedule(title: str, weekday: str = "", date: str = "", time: str = "") -> str:
-    """予定を登録する。weekday=毎週の繰り返し / date=日付指定（YYYY-MM-DD）。"""
-    return profile_store.add_schedule(title, weekday=weekday, date=date, time=time)
+def add_schedule(title: str, weekday: str = "", date: str = "", time: str = "", once: bool = False) -> str:
+    """予定を登録する。weekday=毎週の繰り返し / date=日付指定（YYYY-MM-DD）/ weekday+once=その曜日に1回だけ。"""
+    return profile_store.add_schedule(title, weekday=weekday, date=date, time=time, once=once)
 
 
 def forget(query: str) -> str:
@@ -814,13 +814,14 @@ TOOL_DEFS = [
     },
     {
         "name": "add_schedule",
-        "description": "予定を永続登録する。毎週の繰り返しなら weekday（月〜日）、特定日なら date（YYYY-MM-DD）を指定。『明日』『来週金曜』などの相対表現は、システムプロンプトの現在日時から絶対日付に直して date に入れる（自分で日付を想像しない）。time は HH:MM。例: 『毎週金曜19時に塾』→ title=塾, weekday=金, time=19:00。",
+        "description": "予定を永続登録する。『毎週○曜』は weekday（月〜日）＋once=false。『来週の月曜』『今度の金曜』『次の水曜』など“その曜日に1回だけ”は weekday＋once=true（実日付はシステムが算出するので date は空でよい＝日付を自分で計算しない）。『◯月◯日』など具体的な日は date（YYYY-MM-DD）。time は HH:MM。例: 毎週金曜19時に塾→title=塾,weekday=金,time=19:00 / 来週の月曜に健康診断→title=健康診断,weekday=月,once=true。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "予定の内容（塾、ゼミ発表 など）"},
-                "weekday": {"type": "string", "description": "毎週の繰り返し曜日（月〜日）。日付指定なら空"},
-                "date": {"type": "string", "description": "日付指定 YYYY-MM-DD。繰り返しなら空"},
+                "weekday": {"type": "string", "description": "曜日（月〜日）。毎週の繰り返し、または once=true で『来週の○曜』に使う"},
+                "once": {"type": "boolean", "description": "true=その曜日に1回だけ（来週の○曜/今度の○曜）。false/省略=毎週の繰り返し"},
+                "date": {"type": "string", "description": "具体的な日付 YYYY-MM-DD（『6月20日』等）。weekday指定なら空"},
                 "time": {"type": "string", "description": "時刻 HH:MM（分からなければ空）"},
             },
             "required": ["title"],

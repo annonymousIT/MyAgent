@@ -86,8 +86,14 @@ def _norm_weekday(w: str) -> "int | None":
     return _WD_JA.index(w) if w in _WD_JA else None
 
 
-def add_schedule(title: str, weekday: str = "", date: str = "", time: str = "") -> str:
-    """予定を追加する。weekday があれば毎週の繰り返し、date(YYYY-MM-DD) があれば日付指定。"""
+def add_schedule(title: str, weekday: str = "", date: str = "", time: str = "", once: bool = False) -> str:
+    """予定を追加する。
+
+    - weekday + once=False … 毎週の繰り返し
+    - weekday + once=True  … 「来週の月曜」「今度の金曜」など1回限り。→ 次に来るその曜日の実日付を
+                              Python側で算出して日付指定として登録（日付計算をLLMにさせない＝誤りを防ぐ）
+    - date(YYYY-MM-DD)     … 日付指定
+    """
     title = (title or "").strip()
     if not title:
         return "予定の内容（タイトル）が空です。"
@@ -97,6 +103,16 @@ def add_schedule(title: str, weekday: str = "", date: str = "", time: str = "") 
         wd = _norm_weekday(weekday)
         if wd is None:
             return f"曜日『{weekday}』が解釈できません（月〜日で指定してください）。"
+        if once:
+            # 次に来るその曜日（今日より後の最初の該当日）を Python が算出
+            today = datetime.date.today()
+            delta = (wd - today.weekday()) % 7 or 7
+            d = today + datetime.timedelta(days=delta)
+            entry = {"date": d.isoformat(), "time": time, "title": title}
+            if entry not in p["schedule"]["dated"]:
+                p["schedule"]["dated"].append(entry)
+                save(p)
+            return f"{d.isoformat()}({_WD_JA[d.weekday()]}) {time or '(時刻未定)'} に「{title}」を登録しました。"
         entry = {"weekday": _WD_JA[wd], "time": time, "title": title}
         if entry in p["schedule"]["weekly"]:
             return f"毎週{_WD_JA[wd]}曜 {time} {title} は既に登録済みです。"
@@ -175,6 +191,20 @@ def context_text(now: "datetime.datetime | None" = None) -> str:
     today = now.date()
     p = load()
     lines = [f"【現在日時（システム提供・正確）】{today.isoformat()}({_WD_JA[today.weekday()]}) {now.strftime('%H:%M')}"]
+
+    # 日付早見表（今週・来週・再来週を曜日ラベル付きで）。「来週の月曜」等はこの表を語彙で引く＝計算させない。
+    def _fmt(d):
+        rel = "今日" if d == today else ("明日" if d == today + datetime.timedelta(days=1) else "")
+        return f"{rel}{d.strftime('%-m/%-d')}({_WD_JA[d.weekday()]})"
+    monday = today - datetime.timedelta(days=today.weekday())  # 今週の月曜
+    weeks = []
+    for wi, wlabel in enumerate(("今週", "来週", "再来週")):
+        days = [monday + datetime.timedelta(days=wi * 7 + j) for j in range(7)]
+        # 今週は過去日を出さない（今日以降だけ）
+        days = [d for d in days if d >= today]
+        if days:
+            weeks.append(f"{wlabel}: " + "、".join(_fmt(d) for d in days))
+    lines.append("【日付早見表（『来週の月曜』等の相対日付はこの表を引く・自分で計算しない）】\n" + "\n".join(weeks))
 
     prof = []
     user = p.get("user", {})

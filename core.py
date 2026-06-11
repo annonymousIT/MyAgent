@@ -95,13 +95,28 @@ def available_operations() -> str:
     )
 
 
+_RULES = (
+    "【鉄則（何より優先）】\n"
+    "1. 予定の登録依頼（『毎週〜』『来週の◯曜』『◯日に〜』など日時のある予定）は、必ず add_schedule を呼ぶ。"
+    "記憶依頼（『覚えておいて』『〜なんだよね』等の個人情報）は、必ず remember を呼ぶ。"
+    "ツールを呼ばずに「登録しました」「覚えました」「記憶しました」と言うのは固く禁止（実際には保存されず、嘘になる）。"
+    "保存系の言葉を返すのは、対応するツールを実行した後だけ。\n"
+    "2. 実際に実行した操作（ツールの実行結果）だけを完了として報告する。やっていない起動・配置・保存を「やった」と言わない。"
+)
+
+
 def build_system_prompt(persona: str) -> str:
-    # 人格 ＋ 個人コンテキスト（現在日時・プロフィール・直近予定 / ADR-0029）＋ 操作一覧
-    return persona + "\n\n" + profile_store.context_text() + "\n\n" + available_operations()
+    # 鉄則（最優先）＋ 人格 ＋ 個人コンテキスト（現在日時・プロフィール・直近予定 / ADR-0029）＋ 操作一覧
+    return _RULES + "\n\n" + persona + "\n\n" + profile_store.context_text() + "\n\n" + available_operations()
 
 
 MAX_HISTORY_MESSAGES = 10  # 直近5往復ぶんを保持（ADR-3：直近Nそのまま。古いものの要約は将来）
 MAX_TOOL_ROUNDS = 5  # 「起動→配置」など複数ステップを許す。暴走防止に上限を設ける
+
+# 捏造ガード（ADR-0030）: 保存ツール／保存"完了"を断定する言い回し
+_SAVE_TOOLS = {"remember", "add_schedule", "forget"}
+_SAVE_CLAIMS = ("覚えました", "覚えておきました", "記憶しました", "登録しました", "登録完了",
+                "保存しました", "メモしました", "セットしました", "記録しました")
 
 
 def run_turn(client, persona: str, user_input: str, dry_run: bool = False, history=None) -> dict:
@@ -120,9 +135,37 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     system_prompt = build_system_prompt(persona)  # 人格 ＋ ②材料（利用可能な操作一覧）
     messages = history + [{"role": "user", "content": user_input}]
 
+    def _force_save(claim_reply: str) -> "str | None":
+        """「保存しました」と言ったのにツールを呼んでいない時、ツールを強制して本当に保存させる。"""
+        msgs = history + [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": claim_reply},
+            {"role": "user", "content": "（システム指示）いま保存・登録したと言いましたが、まだツールを実行していません。"
+             "remember / add_schedule / forget のうち適切なものを今すぐ呼んで、実際に保存してください。"},
+        ]
+        try:
+            r = client.messages.create(model=MODEL, max_tokens=300, system=system_prompt,
+                                       tools=tools.TOOL_DEFS, tool_choice={"type": "any"}, messages=msgs)
+        except Exception:
+            return None
+        saved = None
+        for block in r.content:
+            if block.type == "tool_use":
+                result = tools.run_tool(block.name, block.input)
+                actions.append({"kind": "run", "label": f"{block.name}({block.input})",
+                                "result": result, "tool": block.name, "input": block.input})
+                saved = result
+        return saved
+
     def _finish(reply: str) -> dict:
         if reply == "（…）" and actions:  # ツール実行後にモデルが無言だった時の保険：直近のツール結果を返答に使う
             reply = actions[-1]["result"]
+        # 捏造ガード：保存完了を口にしたのに保存ツールを呼んでいない → 強制実行して本当に保存する（ADR-0030）
+        if (not dry_run and not any(a["tool"] in _SAVE_TOOLS for a in actions)
+                and any(p in reply for p in _SAVE_CLAIMS)):
+            forced = _force_save(reply)
+            if forced:
+                reply = forced
         new_history = (history + [
             {"role": "user", "content": user_input},
             {"role": "assistant", "content": reply},
