@@ -190,37 +190,36 @@ def context_text(now: "datetime.datetime | None" = None) -> str:
     now = now or datetime.datetime.now()
     today = now.date()
     p = load()
-    lines = [f"【現在日時（システム提供・正確）】{today.isoformat()}({_WD_JA[today.weekday()]}) {now.strftime('%H:%M')}"]
+    lines = [f"[Now] {today.isoformat()}({_WD_JA[today.weekday()]}) {now.strftime('%H:%M')}"]
 
-    # 日付早見表（今週・来週・再来週を曜日ラベル付きで）。「来週の月曜」等はこの表を語彙で引く＝計算させない。
+    # Date map (this/next/week-after, with weekday). Resolve 来週の月曜 etc. by lookup, never compute.
     def _fmt(d):
         rel = "今日" if d == today else ("明日" if d == today + datetime.timedelta(days=1) else "")
         return f"{rel}{d.strftime('%-m/%-d')}({_WD_JA[d.weekday()]})"
-    monday = today - datetime.timedelta(days=today.weekday())  # 今週の月曜
+    monday = today - datetime.timedelta(days=today.weekday())
     weeks = []
     for wi, wlabel in enumerate(("今週", "来週", "再来週")):
         days = [monday + datetime.timedelta(days=wi * 7 + j) for j in range(7)]
-        # 今週は過去日を出さない（今日以降だけ）
         days = [d for d in days if d >= today]
         if days:
             weeks.append(f"{wlabel}: " + "、".join(_fmt(d) for d in days))
-    lines.append("【日付早見表（『来週の月曜』等の相対日付はこの表を引く・自分で計算しない）】\n" + "\n".join(weeks))
+    lines.append("[Date map — resolve relative dates like 来週の月曜 from this; never compute]\n" + "\n".join(weeks))
 
     prof = []
     user = p.get("user", {})
     if user.get("name"):
-        prof.append(f"名前: {user['name']}" + (f"（呼び方: {user['call']}）" if user.get("call") else ""))
+        prof.append(f"name: {user['name']}" + (f" (call: {user['call']})" if user.get("call") else ""))
     if p.get("places"):
-        prof.append("場所の解決表（天気・移動はこの地名を使う）: "
+        prof.append("place table (use these names for weather/travel): "
                     + "、".join(f"{k}={v}" for k, v in p["places"].items()))
     if p.get("default_location"):
-        prof.append(f"場所未指定のときの既定地名: {p['default_location']}")
+        prof.append(f"default place: {p['default_location']}")
     if p.get("facts"):
-        prof.append("覚えている事実: " + " / ".join(p["facts"]))
+        prof.append("known facts: " + " / ".join(p["facts"]))
     if prof:
-        lines.append("【主人について（永続記憶・これが全て）】\n- " + "\n- ".join(prof))
+        lines.append("[About the user — persistent memory, this is all there is]\n- " + "\n- ".join(prof))
     else:
-        lines.append("【主人について】まだ何も記憶していません（『覚えておいて』で remember に保存できます）。")
+        lines.append("[About the user] nothing remembered yet (use remember to save).")
 
     ups = upcoming(7, today)
     if ups:
@@ -229,9 +228,9 @@ def context_text(now: "datetime.datetime | None" = None) -> str:
             rel = "今日" if d == today else ("明日" if d == today + datetime.timedelta(days=1) else "")
             label = f"{rel}{d.strftime('%m/%d')}({_WD_JA[d.weekday()]})"
             rows.append(f"{label} {t or '時刻未定'} {title}")
-        lines.append("【直近7日の予定（記憶済み・これが全て）】\n- " + "\n- ".join(rows))
+        lines.append("[Next 7 days — all saved events]\n- " + "\n- ".join(rows))
     else:
-        lines.append("【直近7日の予定】登録なし（予定を聞かれたら「登録が無い」と正直に答える）。")
-    lines.append("※上記の記憶・予定に無いことは絶対に作らない。知らない個人情報・予定は正直に『記憶にない』と言うか聞き返す。"
-                 "『明日/今日』は上の現在日時から判断する（日付を自分で計算・想像しない）。")
+        lines.append("[Next 7 days] none saved (if asked about plans, honestly say none).")
+    lines.append("Never invent anything not in the memory/schedule above; if unknown, say 記憶にない or ask. "
+                 "Judge 明日/今日 from [Now]; never compute dates yourself.")
     return "\n".join(lines)

@@ -724,131 +724,89 @@ def _app_is_running(target: str) -> bool:
 TOOL_DEFS = [
     {
         "name": "open_site",
-        "description": "ブラウザでサイトを開く。引数 name は設定の sites 表のキー（例: claude, 課題, 動画）。表記ゆれは近いキーに寄せて解釈する。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string", "description": "開くサイトの名前"}},
-            "required": ["name"],
-        },
+        "description": "Open a website. name = key in sites config (e.g. claude, 課題, 動画).",
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
     },
     {
         "name": "launch_app",
-        "description": "PCのアプリを起動する。引数 name は設定の apps 表のキー（表示名）かその日本語エイリアス（例: ディスコ, ようつべ, メール）。表記ゆれは近いキー/エイリアスに寄せて解釈する。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string", "description": "起動するアプリの名前（表示名 or エイリアス）"}},
-            "required": ["name"],
-        },
+        "description": "Launch an installed app. name = app display name or alias.",
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
     },
     {
         "name": "run_system",
-        "description": "PCのシステム操作（音量・モニタ・スリープ等）を実行する。引数 name は設定の system / dangerous_system 表のキー（例: 音量下げる, モニタ消す, 寝る）。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string", "description": "実行するシステム操作の名前"}},
-            "required": ["name"],
-        },
+        "description": "Run a system action (volume/display/sleep). name = key in system config.",
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
     },
     {
         "name": "web_search",
-        "description": "知りたい情報をブラウザの検索で開く。登録済みのサイト/アプリで直接得られない情報（天気・株価・ニュース・調べもの等）を扱うとき、または『〜どう？/〜は？/調べて/教えて』のように答えを知りたいときに使う。答えを想像で言わず必ずこれで実ソースを開く（捏造防止）。引数 query は検索語（例: 茨木 天気, NVIDIA 株価）。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "検索語"}},
-            "required": ["query"],
-        },
+        "description": "Open web search results for info not in registered sites/apps (weather/stocks/news/lookups). Never invent answers. query = search terms.",
+        "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     },
     {
         "name": "open_url",
-        "description": "指定されたURLをブラウザで開く。明確なURLが分かっているときに使う。引数 url は開くURL。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"url": {"type": "string", "description": "開くURL"}},
-            "required": ["url"],
-        },
+        "description": "Open a specific URL. url = the URL.",
+        "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
         "name": "get_weather",
-        "description": "指定した地名の天気（現在＋明日・明後日までの予報）を実データで取得して伝える。天気・気温・雨・傘の質問は必ずこれを使う（想像で答えない）。引数 location は地名（例: 茨木, Tokyo）。『大学』『学校』など場所語はプロファイルの場所解決表の地名に直して渡す。場所が分からなければ空でよい（既定地名を使う）。取得した実データだけを根拠に日本語で要約して伝えること。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"location": {"type": "string", "description": "地名（省略可＝プロファイルの既定地）"}},
-        },
+        "description": "Get real weather (current + forecast) for any weather/temp/rain question. location = place name; map words like 大学/学校 via the profile place table; empty = default place.",
+        "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
     },
     {
         "name": "fetch_page",
-        "description": "指定URLの本文を取得して返す。具体的な記事/サイトの内容を読んで要約・回答したいときに使う（戻り値の実データだけを根拠に要約する＝捏造防止）。検索結果ページ(google等)はボット遮断で取れないことが多い。引数 url は取得するURL。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"url": {"type": "string", "description": "取得するURL"}},
-            "required": ["url"],
-        },
+        "description": "Fetch a URL's body text to read/summarize a specific article. url = the URL.",
+        "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
         "name": "play_media",
-        "description": "動画や音楽を検索して開く（開いたら残す＝自動で閉じない）。「〜の動画見たい」「〜流して/聴きたい」「あれ流して」などメディアを見聞きしたい時に使う。query は曲名・動画名・アーティスト等。kind は 'video'（YouTube）か 'music'（Spotify）。迷ったら video。",
+        "description": "Search & open video/music (stays open). query = title/artist. kind = video (YouTube) or music (Spotify); default video.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "曲名・動画名・アーティスト名など"},
-                "kind": {"type": "string", "enum": ["video", "music"], "description": "video=動画 / music=音楽"},
-            },
+            "properties": {"query": {"type": "string"}, "kind": {"type": "string", "enum": ["video", "music"]}},
             "required": ["query"],
         },
     },
     {
         "name": "manage_window",
-        "description": "ウィンドウを画面に配置する（Macのみ・要アクセシビリティ許可）。「左/右に寄せて」「最大化」「中央に」「ウィンドウ一覧」など。action は left/right/maximize/center/list。app は対象アプリ名（省略時は最前面のウィンドウ）。メインディスプレイ前提。",
+        "description": "Tile/place a window (macOS). action = left/right/maximize/center/list. app = target (empty = frontmost).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["left", "right", "maximize", "center", "list"], "description": "配置/操作"},
-                "app": {"type": "string", "description": "対象アプリ名（省略可＝最前面）"},
+                "action": {"type": "string", "enum": ["left", "right", "maximize", "center", "list"]},
+                "app": {"type": "string"},
             },
             "required": ["action"],
         },
     },
     {
         "name": "remember",
-        "description": "主人の個人情報・事実を永続記憶する。「〜を覚えておいて」「〜なんだよね（記憶してほしい文脈）」のとき使う。fact は後で読んで分かる自己完結の一文にする（例: 『大学=立命館 大阪いばらきキャンパス（場所: 茨木）』『彼女はあやさん』）。予定（曜日・日付があるもの）は remember ではなく add_schedule を使う。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"fact": {"type": "string", "description": "覚える事実（自己完結の一文）"}},
-            "required": ["fact"],
-        },
+        "description": "Persistently remember a fact about the user. fact = a self-contained sentence. Use add_schedule (not this) for anything with a weekday/date.",
+        "input_schema": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]},
     },
     {
         "name": "add_schedule",
-        "description": "予定を永続登録する。『毎週○曜』は weekday（月〜日）＋once=false。『来週の月曜』『今度の金曜』『次の水曜』など“その曜日に1回だけ”は weekday＋once=true（実日付はシステムが算出するので date は空でよい＝日付を自分で計算しない）。『◯月◯日』など具体的な日は date（YYYY-MM-DD）。time は HH:MM。例: 毎週金曜19時に塾→title=塾,weekday=金,time=19:00 / 来週の月曜に健康診断→title=健康診断,weekday=月,once=true。",
+        "description": "Save an event. Weekly recurring: weekday(月〜日)+once=false. One-off on the next given weekday (来週の○曜/今度の○曜): weekday+once=true (system computes the date; leave date empty). Specific day: date=YYYY-MM-DD. time=HH:MM.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "予定の内容（塾、ゼミ発表 など）"},
-                "weekday": {"type": "string", "description": "曜日（月〜日）。毎週の繰り返し、または once=true で『来週の○曜』に使う"},
-                "once": {"type": "boolean", "description": "true=その曜日に1回だけ（来週の○曜/今度の○曜）。false/省略=毎週の繰り返し"},
-                "date": {"type": "string", "description": "具体的な日付 YYYY-MM-DD（『6月20日』等）。weekday指定なら空"},
-                "time": {"type": "string", "description": "時刻 HH:MM（分からなければ空）"},
+                "title": {"type": "string"},
+                "weekday": {"type": "string", "description": "月〜日"},
+                "once": {"type": "boolean"},
+                "date": {"type": "string", "description": "YYYY-MM-DD"},
+                "time": {"type": "string", "description": "HH:MM"},
             },
             "required": ["title"],
         },
     },
     {
         "name": "forget",
-        "description": "記憶した事実・予定を削除する。「〜のこと忘れて」「塾やめたから消して」のとき使う。query は対象を特定できる語（例: あやさん, 塾）。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "削除対象を特定する語"}},
-            "required": ["query"],
-        },
+        "description": "Delete a remembered fact or schedule. query = substring identifying the target.",
+        "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     },
     {
         "name": "close_app",
-        "description": "開いているアプリやサイトを閉じる。「〜閉じて」「〜消して」「〜やめて」「もういい」などウィンドウ/アプリを閉じたい時に使う。name は閉じる対象（アプリ名・サイト名）。直前に開いたものを閉じる文脈なら、その名前を入れる。",
-        "input_schema": {
-            "type": "object",
-            "properties": {"name": {"type": "string", "description": "閉じる対象のアプリ名・サイト名"}},
-            "required": ["name"],
-        },
+        "description": "Close an open app/site (閉じて/消して/やめて). name = target app/site; use the just-opened one from context.",
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
     },
 ]
 

@@ -63,54 +63,69 @@ def _app_label(name: str, entry) -> str:
     return name
 
 
-def available_operations() -> str:
-    """②材料：現在のconfigから「いま実行できる操作の名前候補」を組み立てる。
+def static_menu() -> str:
+    """Stable part of the system prompt (cacheable): what the agent can do + config names.
 
-    これをシステムプロンプトに同梱することで、モデルが自分に何ができるかを把握し、
-    曖昧な指示の解釈・候補が複数のときの聞き返し・無い操作の正直な拒否ができるようになる。
-    マージ後の2層構造（ADR-0011）に追従：apps は「表示名(主要エイリアス)」で列挙する。
+    English to save tokens; config keys (sites/apps/system) stay verbatim since they
+    are the actual lookup keys. Aliases are NOT listed — the resolver maps them at call
+    time, so passing the user's word works regardless. Running apps live in the volatile part.
     """
     cfg = tools.load_config()
     sites = "、".join(cfg.get("sites", {}).keys())
-    apps = "、".join(_app_label(name, entry) for name, entry in cfg.get("apps", {}).items())
+    apps = "、".join(cfg.get("apps", {}).keys())
     system = "、".join(list(cfg.get("system", {}).keys()) + list(cfg.get("dangerous_system", {}).keys()))
-    running = "、".join(tools.running_apps()) or "(取得なし)"
     return (
-        f"【いま起動中のアプリ（現在の実状態）】: {running}\n"
-        "※これは今この瞬間に開いているアプリ。これを基準に判断する。ここに無いアプリは閉じている前提。"
-        "ただし Chrome の PWA（YouTube/Gmail/moodle等）はこの一覧に出ないので、開閉が不確かなら launch_app で開く"
-        "（launch_app は開いていれば前面化するだけで無害）。\n"
-        "【いまPCで実行できること（使うツール）】\n"
-        "・サイトとアプリで同名が両方ある時はアプリ(専用ウィンドウ)を優先します。\n"
-        f"・open_site（サイトを開く）の name 候補: {sites}\n"
-        f"・launch_app（アプリ起動）の name 候補（カッコ内は呼び名・略語、それでも引けます）: {apps}\n"
-        f"・run_system（システム操作）の name 候補: {system}\n"
-        "・close_app（閉じる）: 開いたアプリ/サイトを閉じる。『〜閉じて/消して/やめて』はこれ（システム操作と混同しない）。\n"
-        "・get_weather（天気）: 『天気どう？』は必ずこれで実データを取り、要約して伝える（web_searchではない）。\n"
-        "・play_media（動画/音楽）: 『〜の動画見たい/流して/聴きたい』。開いて残す。\n"
-        "・manage_window（ウィンドウ配置）: 『左/右に寄せて・最大化・中央・一覧』。\n"
-        "・fetch_page（ページ本文取得）/ web_search（検索）/ open_url（URLを開く）: 上記に無い調べもの（株価/ニュース/事実確認等）や『調べて/教えて』に実ソースで答える。\n"
-        "・remember（永続記憶）/ add_schedule（予定登録）/ forget（記憶削除）: 『覚えておいて』『毎週金曜19時に塾』『〜忘れて』。保存後は毎ターン上の記憶欄に出る。\n"
-        "・アプリや検索を開くだけで終わらせず、取得した実データを根拠に答える。本当にPCで不可能なことだけ正直に断る（捏造しない）。"
+        "[Capabilities]\n"
+        "- If a name is both a site and an app, prefer the app (dedicated window).\n"
+        "- If intent maps to a registered op, do it; if ambiguous between several, ask one short question.\n"
+        "- Deliver real info: weather/temp/rain -> get_weather; article/page content -> fetch_page; "
+        "other lookups (stocks/news/facts) or 調べて/教えて -> web_search/open_url. Never invent; cite the fetched data.\n"
+        "- Media (動画見たい/流して/聴きたい) -> play_media (stays open). Close (閉じて/消して/やめて) -> close_app. "
+        "Window (左/右/最大化/中央) -> manage_window.\n"
+        "- Remember/schedule/forget per the hard rules above.\n"
+        f"- open_site names: {sites}\n"
+        f"- launch_app names (also openable by alias/reading; resolver handles it): {apps}\n"
+        f"- run_system names: {system}"
+    )
+
+
+def volatile_context() -> str:
+    """Per-turn changing part (not cached): current time/profile/schedule + running apps."""
+    running = "、".join(tools.running_apps()) or "(none)"
+    return (
+        profile_store.context_text() + "\n"
+        f"[Running apps now]: {running}\n"
+        "These are the apps open right now — judge from this. Not listed = closed. "
+        "Chrome PWAs (YouTube/Gmail/moodle) don't appear here, so if unsure just launch_app "
+        "(harmless — only brings to front if already open)."
     )
 
 
 _RULES = (
-    "【鉄則（何より優先）】\n"
-    "1. 予定の登録依頼（『毎週〜』『来週の◯曜』『◯日に〜』など日時のある予定）は、必ず add_schedule を呼ぶ。"
-    "記憶依頼（『覚えておいて』『〜なんだよね』等の個人情報）は、必ず remember を呼ぶ。"
-    "ツールを呼ばずに「登録しました」「覚えました」「記憶しました」と言うのは固く禁止（実際には保存されず、嘘になる）。"
-    "保存系の言葉を返すのは、対応するツールを実行した後だけ。\n"
-    "2. 実際に実行した操作（ツールの実行結果）だけを完了として報告する。やっていない起動・配置・保存を「やった」と言わない。"
+    "[Hard rules — top priority]\n"
+    "1. A request to save a schedule (毎週〜 / 来週の◯曜 / a dated event) MUST call add_schedule. "
+    "A request to remember personal info (覚えておいて etc.) MUST call remember. "
+    "NEVER say you saved/registered/remembered something without first calling the tool — that would be a lie (nothing is stored). "
+    "Only use save/registered wording after the tool has run.\n"
+    "2. Only report actions you actually performed (tool results). Never claim a launch/placement/save you did not do.\n"
+    "3. Always reply to the user in Japanese, fully in character (see persona below)."
 )
 
 
-def build_system_prompt(persona: str) -> str:
-    # 鉄則（最優先）＋ 人格 ＋ 個人コンテキスト（現在日時・プロフィール・直近予定 / ADR-0029）＋ 操作一覧
-    return _RULES + "\n\n" + persona + "\n\n" + profile_store.context_text() + "\n\n" + available_operations()
+def build_system_prompt(persona: str):
+    """System prompt as 2 blocks for prompt caching (コスト最適化):
+    - stable block (rules + persona + static menu) carries cache_control -> also caches
+      the tools (rendered before system). Reused across the multi-round loop & bursts at ~0.1x.
+    - volatile block (current time / profile / running apps) sits after the breakpoint, uncached.
+    """
+    stable = _RULES + "\n\n" + persona + "\n\n" + static_menu()
+    return [
+        {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": volatile_context()},
+    ]
 
 
-MAX_HISTORY_MESSAGES = 10  # 直近5往復ぶんを保持（ADR-3：直近Nそのまま。古いものの要約は将来）
+MAX_HISTORY_MESSAGES = 6  # 直近3往復（コスト最適化で10→6。古いものの要約は将来）
 MAX_TOOL_ROUNDS = 5  # 「起動→配置」など複数ステップを許す。暴走防止に上限を設ける
 
 # 捏造ガード（ADR-0030）: 保存ツール／保存"完了"を断定する言い回し
