@@ -18,6 +18,7 @@ DEFAULTS = {
     "voicevox_pitch": -0.085,     # 音高（負で低め）
     "voicevox_speed": 0.95,       # 話速（1.0=既定）
     "say_voice": "Kyoko",         # VOICEVOX 未起動時の OS 音声（Mac）
+    "orb_theme": "moonlight",     # orb の配色（moonlight / amethyst / mist / ember）
 }
 
 
