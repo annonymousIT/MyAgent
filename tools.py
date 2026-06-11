@@ -1,8 +1,16 @@
 """操作（“手”）の実装。OS（Windows / Mac）を自動判定し、対応する設定表から実体を引く。
 
-設定表は OS ごとに分離（config_win.json / config_mac.json）。
-コード本体はOS差分を吸収するだけで、URL・アプリ・コマンドの実体は一切ベタ書きしない。
+設定は2層（ADR-0011）:
+  - config.auto.json … OSスキャンで自動生成（apps：起動対象・分類・日本語エイリアス）。再生成可。
+  - config.user.json … 手動。sites（URL）/ system / dangerous_system / apps（手動追加）/ overrides。
+load_config() が両者をマージし、**user層が auto層を上書き**する。
+2層ファイルが無ければ従来の config_mac.json / config_win.json にフォールバック（後方互換）。
+
+サイトとアプリで名前が衝突したときは **アプリ(PWA)優先**（ADR-0016）。
+config.user.json の "overrides" に {"<name>": "site"} を置くと、その name だけサイト優先に戻せる。
 """
+
+from __future__ import annotations
 
 import json
 import platform
@@ -13,35 +21,142 @@ from pathlib import Path
 IS_MAC = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
-_CONFIG_NAME = "config_mac.json" if IS_MAC else "config_win.json"
-CONFIG_PATH = Path(__file__).parent / _CONFIG_NAME
+BASE = Path(__file__).parent
+
+# 2層（新）
+AUTO_CONFIG_PATH = BASE / "config.auto.json"
+USER_CONFIG_PATH = BASE / "config.user.json"
+
+# 旧・単一config（後方互換フォールバック）
+_LEGACY_NAME = "config_mac.json" if IS_MAC else "config_win.json"
+LEGACY_CONFIG_PATH = BASE / _LEGACY_NAME
+
+# エラーメッセージ等で「どこを直せばいいか」を案内するための参照名
+CONFIG_HINT = "config.user.json" if (AUTO_CONFIG_PATH.exists() or USER_CONFIG_PATH.exists()) else _LEGACY_NAME
 
 
-def load_config():
-    with open(CONFIG_PATH, encoding="utf-8") as f:
+def _read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
+def load_config() -> dict:
+    """2層（auto + user）をマージして返す。user が auto を上書き。
+
+    2層ファイルがどちらか存在すればそれを使い、無ければ旧 config_*.json に
+    フォールバックする（後方互換）。
+
+    返す構造（マージ後）:
+      {
+        "sites": {...},              # user層のみ（URLは手動必須）
+        "apps":  {                   # auto層 + user層（user優先）
+          "<表示名>": {"target","kind","path","category","aliases"} | "<旧来の文字列>"
+        },
+        "system": {...},             # user層（無ければlegacy）
+        "dangerous_system": {...},
+        "overrides": {"<name>": "site"}  # サイト優先に戻す指定
+      }
+    """
+    auto = _read_json(AUTO_CONFIG_PATH)
+    user = _read_json(USER_CONFIG_PATH)
+
+    # どちらの新ファイルも無ければ旧configにフォールバック
+    if not auto and not user:
+        return _read_json(LEGACY_CONFIG_PATH)
+
+    # apps は auto を土台に user で上書き（user優先）
+    merged_apps = dict(auto.get("apps", {}))
+    merged_apps.update(user.get("apps", {}))
+
+    return {
+        "sites": user.get("sites", {}),
+        "apps": merged_apps,
+        "system": user.get("system", {}),
+        "dangerous_system": user.get("dangerous_system", {}),
+        "overrides": user.get("overrides", {}),
+    }
+
+
+# --------------------------------------------------------------------------
+# apps の解決（表示名 + エイリアスで引く）
+# --------------------------------------------------------------------------
+def _app_target(entry) -> "str | None":
+    """apps の値（新スキーマ dict or 旧スキーマ str）から open -a 用 target を取り出す。"""
+    if isinstance(entry, dict):
+        return entry.get("target")
+    if isinstance(entry, str):
+        return entry  # 旧スキーマ：値がそのまま target（アプリ名 or exeパス）
+    return None
+
+
+def _resolve_app(apps: dict, name: str) -> "str | None":
+    """name（表示名 or エイリアス）から target を解決する。
+
+    解決順：表示名の完全一致 → エイリアス完全一致 → 表示名/エイリアスの大小無視一致。
+    site のキーは小文字（youtube/github 等）、アプリ表示名は大小混在（YouTube/GitHub）
+    なので、衝突検出やLLMの表記ゆれを拾えるよう最後に大小無視で寄せる。
+    """
+    # 1) 表示名（キー）に完全一致
+    if name in apps:
+        return _app_target(apps[name])
+    # 2) エイリアスに完全一致（新スキーマのみ aliases を持つ）
+    for entry in apps.values():
+        if isinstance(entry, dict) and name in (entry.get("aliases") or []):
+            return _app_target(entry)
+    # 3) 大小無視で表示名/エイリアスに一致
+    lower = name.lower()
+    for key, entry in apps.items():
+        if key.lower() == lower:
+            return _app_target(entry)
+        if isinstance(entry, dict):
+            if any(lower == a.lower() for a in (entry.get("aliases") or [])):
+                return _app_target(entry)
+    return None
+
+
+def _app_matches(apps: dict, name: str) -> bool:
+    """name が apps（表示名/エイリアス）に該当するか。"""
+    return _resolve_app(apps, name) is not None
+
+
 def open_site(name: str) -> str:
-    """名前→URL表からURLを引いてブラウザで開く（OS共通）。"""
-    sites = load_config().get("sites", {})
+    """名前→URL表からURLを引いてブラウザで開く（OS共通）。
+
+    PWA優先（ADR-0016）：同名のアプリ(PWA)があり、overrides で site 指定されていなければ、
+    サイトではなくアプリ起動に委譲する。
+    """
+    cfg = load_config()
+    sites = cfg.get("sites", {})
+    apps = cfg.get("apps", {})
+    overrides = cfg.get("overrides", {})
+
+    # 衝突時のPWA優先：site強制が無く、アプリ側に該当があればアプリを起動
+    if overrides.get(name) != "site" and _app_matches(apps, name):
+        return launch_app(name)
+
     url = sites.get(name)
     if not url:
-        return f"『{name}』に対応するサイトが {_CONFIG_NAME} にありません。"
+        return f"『{name}』に対応するサイトが {CONFIG_HINT} にありません。"
     if url.startswith("https://("):  # まだ書き換えてないプレースホルダ
-        return f"『{name}』のURLが未設定です（{_CONFIG_NAME} を書き換えてください）。"
+        return f"『{name}』のURLが未設定です（{CONFIG_HINT} を書き換えてください）。"
     webbrowser.open(url)
     return f"{name} を開きました（{url}）。"
 
 
 def launch_app(name: str) -> str:
-    """名前→アプリ表から引いて起動する。Windowsはexeパス、Macはアプリ名を `open -a` で起動。"""
-    apps = load_config().get("apps", {})
-    target = apps.get(name)
+    """名前→アプリ表から引いて起動する。Mac は `open -a target`、Windows は exeパス起動。
+
+    apps はエイリアスも含めて解決する。pwa/native とも Mac では `open -a` でOK。
+    """
+    cfg = load_config()
+    apps = cfg.get("apps", {})
+    target = _resolve_app(apps, name)
     if not target:
-        return f"『{name}』に対応するアプリが {_CONFIG_NAME} にありません。"
-    if "(" in target:  # まだ書き換えてないプレースホルダ
-        return f"『{name}』のパスが未設定です（{_CONFIG_NAME} を書き換えてください）。"
+        return f"『{name}』に対応するアプリが {CONFIG_HINT} にありません。"
+    if "(" in target:  # 旧Windows config 等の未設定プレースホルダ
+        return f"『{name}』のパスが未設定です（{CONFIG_HINT} を書き換えてください）。"
     try:
         if IS_MAC:
             subprocess.Popen(["open", "-a", target])
@@ -73,7 +188,7 @@ def run_system(name: str) -> str:
             return f"{name} を実行しました。"
         return f"{name} は中止しました。"
 
-    return f"『{name}』に対応するシステムコマンドが {_CONFIG_NAME} にありません。"
+    return f"『{name}』に対応するシステムコマンドが {CONFIG_HINT} にありません。"
 
 
 # Claude に渡すツール定義（tool use）
@@ -89,10 +204,10 @@ TOOL_DEFS = [
     },
     {
         "name": "launch_app",
-        "description": "PCのアプリを起動する。引数 name は設定の apps 表のキー（例: ばろ, ディスコード, 電話）。表記ゆれは近いキーに寄せて解釈する。",
+        "description": "PCのアプリを起動する。引数 name は設定の apps 表のキー（表示名）かその日本語エイリアス（例: ディスコ, ようつべ, メール）。表記ゆれは近いキー/エイリアスに寄せて解釈する。",
         "input_schema": {
             "type": "object",
-            "properties": {"name": {"type": "string", "description": "起動するアプリの名前"}},
+            "properties": {"name": {"type": "string", "description": "起動するアプリの名前（表示名 or エイリアス）"}},
             "required": ["name"],
         },
     },

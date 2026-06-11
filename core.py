@@ -49,20 +49,35 @@ def _text_of(response) -> str:
     return "".join(parts).strip() or "（…）"
 
 
+def _app_label(name: str, entry) -> str:
+    """apps の1項目を「表示名(主要エイリアス)」の表記に整える。
+
+    新スキーマ（dict）なら aliases を最大2件まで併記し、LLM がエイリアスでも
+    引けることを明示する。旧スキーマ（str）なら表示名のみ。
+    """
+    if isinstance(entry, dict):
+        aliases = entry.get("aliases") or []
+        if aliases:
+            return f"{name}({'・'.join(aliases[:2])})"
+    return name
+
+
 def available_operations() -> str:
     """②材料：現在のconfigから「いま実行できる操作の名前候補」を組み立てる。
 
     これをシステムプロンプトに同梱することで、モデルが自分に何ができるかを把握し、
     曖昧な指示の解釈・候補が複数のときの聞き返し・無い操作の正直な拒否ができるようになる。
+    マージ後の2層構造（ADR-0011）に追従：apps は「表示名(主要エイリアス)」で列挙する。
     """
     cfg = tools.load_config()
     sites = "、".join(cfg.get("sites", {}).keys())
-    apps = "、".join(cfg.get("apps", {}).keys())
+    apps = "、".join(_app_label(name, entry) for name, entry in cfg.get("apps", {}).items())
     system = "、".join(list(cfg.get("system", {}).keys()) + list(cfg.get("dangerous_system", {}).keys()))
     return (
         "【いま利用可能な操作（この一覧の名前しか実行できません。無いものは正直に「用意がない」と答える）】\n"
+        "・サイトとアプリで同名が両方ある時はアプリ(専用ウィンドウ)を優先します。\n"
         f"・open_site の name 候補: {sites}\n"
-        f"・launch_app の name 候補: {apps}\n"
+        f"・launch_app の name 候補（カッコ内は呼び名・略語、それでも引けます）: {apps}\n"
         f"・run_system の name 候補: {system}"
     )
 

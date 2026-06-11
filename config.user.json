@@ -1,0 +1,29 @@
+{
+  "_comment": "手動層（ADR-0011）。config.auto.json をこの内容が上書きする（user優先）。再スキャンで auto は作り直されるが、ここは消えない。",
+  "_overrides_help": "overrides は『サイトとアプリで名前が衝突したときに、その名前だけサイト優先に戻す』ためのもの。既定はアプリ(PWA)優先(ADR-0016)。例: \"github\": \"site\" と書くと github はブラウザで開く。",
+
+  "sites": {
+    "claude": "https://claude.ai",
+    "課題": "https://lms.ritsumei.ac.jp/",
+    "manaba": "https://lms.ritsumei.ac.jp/",
+    "moodle": "https://lms.ritsumei.ac.jp/",
+    "動画": "https://youtube.com",
+    "youtube": "https://youtube.com",
+    "github": "https://github.com"
+  },
+
+  "apps": {},
+
+  "system": {
+    "音量下げる": "osascript -e 'set volume output volume 25'",
+    "音量上げる": "osascript -e 'set volume output volume 70'",
+    "モニタ消す": "pmset displaysleepnow"
+  },
+
+  "dangerous_system": {
+    "寝る": "osascript -e 'tell application \"System Events\" to sleep'",
+    "再起動": "osascript -e 'tell application \"System Events\" to restart'"
+  },
+
+  "overrides": {}
+}

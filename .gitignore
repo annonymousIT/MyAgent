@@ -11,6 +11,9 @@ credentials.json
 token.json
 *.key
 
+# マシン固有の自動生成設定（setup.py が再生成。ローカルパスを含むのでコミットしない）
+config.auto.json
+
 # OS
 Thumbs.db
 .DS_Store

@@ -46,13 +46,34 @@
 
 拡張は設定表に1行足すだけ。
 
+### 設定の2層化（フレームワーク化 step1 / ADR-0011・0012・0016）
+
+身近な人に渡せるよう、アプリ一覧・カテゴリ・日本語の呼び名（略語）を**手で書かず自動生成**する。
+
+- `config.auto.json` … `python setup.py` がOSスキャンで自動生成（再生成可）。
+  - PWA：`~/Applications/Chrome Apps.localized/*.app`、native：`/Applications` ほかを走査。
+  - Claude（haiku）が各アプリに `category` と日本語 `aliases`（例 YouTube→ようつべ）を付与。
+  - 構造：`{"apps": {"<表示名>": {"target","kind":"pwa|native","path","category","aliases":[...]}}}`
+- `config.user.json` … 手動層。`sites`（URLは手動必須）/ `system` / `dangerous_system` / 手動追加 `apps` / `overrides`。
+- `tools.load_config()` が2層をマージし、**user層がauto層を上書き**する。
+  両ファイルが無ければ旧 `config_mac.json` / `config_win.json` にフォールバック（後方互換）。
+
+**PWA優先（ADR-0016）**：同じ名前がサイト(sites)とアプリ(apps)の両方にある時は、専用ウィンドウで開く**アプリ(PWA)を優先**する。
+
+- `launch_app` は表示名だけでなく**エイリアスでも**引ける（menu にエイリアスを併記）。
+- `open_site` は、同名のアプリがあれば `launch_app` に委譲する（大小無視で衝突判定）。
+- 特定の名前だけサイトで開きたいときは `config.user.json` の `"overrides"` に
+  `{"<name>": "site"}` を書く（例：`"github": "site"` で github はブラウザのタブで開く）。
+
+セットアップ：`source .env && source .venv/bin/activate && python setup.py`
+
 ### クロスプラットフォーム設計
 
 OS差分は**設定ファイルに隔離**し、コード本体は共通に保つ。
 
-- `config_win.json` … Windows用（exeパス / `nircmd` 等）
-- `config_mac.json` … Mac用（アプリ名 / `osascript`・`pmset` 等）
-- `tools.py` が `platform.system()` を見て自動で読み分ける（Mac=Darwin→mac、それ以外→win）
+- `config_win.json` … Windows用（exeパス / `nircmd` 等）※2層化前の旧フォールバック
+- `config_mac.json` … Mac用（アプリ名 / `osascript`・`pmset` 等）※同上
+- `setup.py` のアプリスキャンは現状 **Mac専用**。Windows はスタートメニュー/レジストリ走査でのスキャンが **TODO**。
 - 発声 `speak.py` も Mac=`say` / Windows=SAPI を自動切替（口のインターフェースを固定し、将来VOICEVOXに無変更で差し替え可能）
 
 ---
