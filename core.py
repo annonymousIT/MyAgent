@@ -113,7 +113,9 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
             {"role": "user", "content": user_input},
             {"role": "assistant", "content": reply},
         ])[-MAX_HISTORY_MESSAGES:]
-        return {"actions": actions, "reply": reply, "history": new_history}
+        # ephemeral（今ターンで開いた一時タブのURL）も返す。呼び出し側が次ターンで閉じる（ADR-0021）。
+        return {"actions": actions, "reply": reply, "history": new_history,
+                "ephemeral": tools.pop_ephemeral_opened()}
 
     response = client.messages.create(
         model=MODEL, max_tokens=300, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages

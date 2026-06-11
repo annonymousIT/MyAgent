@@ -13,6 +13,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import core
+import tools
 
 PORT = 8765
 
@@ -139,6 +140,7 @@ class Handler(BaseHTTPRequestHandler):
     client = None
     persona = ""
     history = []  # 会話履歴（Step5(a)）。単一ユーザー前提でプロセス内に保持
+    pending_ephemeral = []  # 前ターンで開いた一時タブのURL（次ターン頭で閉じる・ADR-0021）
 
     def log_message(self, *args):  # アクセスログを黙らせる
         pass
@@ -169,6 +171,10 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 self._send(200, json.dumps({"actions": [], "reply": "（何か入力してください）"}), "application/json")
                 return
+            # 前ターンで開いた一時タブを閉じる（ephemeralの後片付け・ADR-0021）
+            if Handler.pending_ephemeral:
+                tools.close_browser_tabs(Handler.pending_ephemeral)
+                Handler.pending_ephemeral = []
             # 会話のリセット（記憶を消す）
             if text in ("リセット", "履歴クリア", "忘れて", "リセットして"):
                 Handler.history = []
@@ -176,6 +182,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             result = core.run_turn(self.client, self.persona, text, dry_run=dry, history=Handler.history)
             Handler.history = result.pop("history", Handler.history)  # 次ターンへ持ち越し（clientには返さない）
+            Handler.pending_ephemeral = result.pop("ephemeral", [])  # 今ターンの一時タブは次ターンで閉じる
             self._send(200, json.dumps(result, ensure_ascii=False), "application/json; charset=utf-8")
         except Exception as e:
             self._send(200, json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False), "application/json; charset=utf-8")

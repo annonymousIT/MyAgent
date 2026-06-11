@@ -171,11 +171,14 @@ def launch_app(name: str) -> str:
         return f"『{name}』に対応するアプリが {CONFIG_HINT} にありません。"
     if "(" in target:  # 旧Windows config 等の未設定プレースホルダ
         return f"『{name}』のパスが未設定です（{CONFIG_HINT} を書き換えてください）。"
+    already = _app_is_running(target)  # 重複起動の判定（Step5(b)）
     try:
         if IS_MAC:
-            subprocess.Popen(["open", "-a", target])
+            subprocess.Popen(["open", "-a", target])  # 起動中なら前面化されるだけ（再起動しない）
         else:
             subprocess.Popen([target])
+        if already:
+            return f"{name} は既に開いています（前面に出しました）。"
         return f"{name} を起動しました。"
     except Exception as e:
         return f"{name} の起動に失敗しました：{e}"
@@ -205,16 +208,32 @@ def run_system(name: str) -> str:
     return f"『{name}』に対応するシステムコマンドが {CONFIG_HINT} にありません。"
 
 
+# このプロセスで ephemeral（一時的）に開いたURLの記録（Step5(b) / ADR-0021）。
+# web_search / open_url が開いたURLをここに積み、run_turn が pop して呼び出し側へ渡す。
+# 呼び出し側（web.py）は次ターン頭でこれらのタブを自動クローズする。
+_EPHEMERAL_OPENED: "list[str]" = []
+
+
+def pop_ephemeral_opened() -> "list[str]":
+    """今ターンで ephemeral に開いたURLを取り出してバッファを空にする。"""
+    global _EPHEMERAL_OPENED
+    urls = _EPHEMERAL_OPENED
+    _EPHEMERAL_OPENED = []
+    return urls
+
+
 def web_search(query: str) -> str:
     """登録ソースに無い情報を『届ける』ための汎用Web検索（Tier2 / ADR-0018）。
 
     天気・株価・ニュースなど、知りたい情報をブラウザの検索結果として開く。
     捏造防止：答えを想像で言わず、必ず実ソース（検索結果）を開く。Step3で読み上げまで繋げる。
+    開いた検索タブは ephemeral 扱い（次ターンで自動クローズ・ADR-0021）。
     """
     if not query or not query.strip():
         return "検索語が空です。"
     url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
     webbrowser.open(url)
+    _EPHEMERAL_OPENED.append(url)
     return f"「{query}」を検索しました。"
 
 
@@ -226,7 +245,55 @@ def open_url(url: str) -> str:
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
     webbrowser.open(target)
+    _EPHEMERAL_OPENED.append(target)
     return f"{target} を開きました。"
+
+
+def close_browser_tabs(urls: "list[str]") -> int:
+    """指定URLに一致するブラウザタブを閉じる（ephemeralの後片付け・Mac/Chrome）。
+
+    閉じた数を返す。Chrome以外・未起動・権限未許可などは静かに0で返す（本体を止めない）。
+    ※初回は macOS の「"Terminal"が"Google Chrome"を制御」許可が要る。
+    """
+    if not IS_MAC or not urls:
+        return 0
+    closed = 0
+    for url in urls:
+        safe = url.replace("\\", "\\\\").replace('"', '\\"')
+        script = f'''
+        tell application "Google Chrome"
+          set c to 0
+          if it is running then
+            repeat with w in windows
+              set tl to tabs of w
+              repeat with k from (count of tl) to 1 by -1
+                if (URL of (item k of tl)) contains "{safe}" then
+                  close (item k of tl)
+                  set c to c + 1
+                end if
+              end repeat
+            end repeat
+          end if
+          return c
+        end tell'''
+        try:
+            r = subprocess.run(["osascript", "-e", script], check=False,
+                               capture_output=True, text=True, timeout=8)
+            closed += int(r.stdout.strip() or 0)
+        except Exception:
+            pass
+    return closed
+
+
+def _app_is_running(target: str) -> bool:
+    """アプリが既に起動中か（重複起動の判定・Mac）。権限不要の pgrep で判定。判定不能なら False。"""
+    if not IS_MAC:
+        return False
+    try:
+        r = subprocess.run(["pgrep", "-x", target], check=False, capture_output=True, text=True, timeout=4)
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 # Claude に渡すツール定義（tool use）
