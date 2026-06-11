@@ -4,5 +4,5 @@ icalendar
 recurring_ical_events
 faster-whisper
 sounddevice
-webrtcvad
+webrtcvad-wheels  # webrtcvad のプリビルト版（Windows でも C コンパイラ不要で入る・import名は webrtcvad）
 numpy

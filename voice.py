@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import collections
 import os
+import queue
 import random
 import re
 import sys
@@ -203,33 +204,47 @@ def main() -> None:
 
             front = tools._front_process() if speak_mod.IS_MAC else ""
 
-            # LLMを別スレッドで回し、0.9秒で返らなければ相槌を即再生（無音の待ちを消す）
+            # ストリーミング発声（#34）：LLMの返事を別スレッドで回し、文が出来た端から
+            # キューへ。ここ（メインスレッド）が順番に読み上げる＝順序保証＆読み上げ中はマイクを
+            # 開かない（自分の声での誤起動を防ぐ）。最初の一文が遅ければ相槌で間を埋める。
+            spoken_q: "queue.Queue" = queue.Queue()
             box: dict = {}
 
             def _work() -> None:
                 try:
-                    box["r"] = core.run_turn(client, persona, text, dry_run=False, history=history)
+                    box["r"] = core.run_turn(client, persona, text, dry_run=False,
+                                             history=history, on_sentence=spoken_q.put)
                 except Exception as e:  # noqa: BLE001
                     box["e"] = e
+                finally:
+                    spoken_q.put(None)  # 終端（例外時も必ず置く）
 
-            th = threading.Thread(target=_work, daemon=True)
-            th.start()
-            th.join(FILLER_AFTER)
-            if th.is_alive() and fillers:
-                speak_mod._play_wav(random.choice(fillers))
-            th.join()
+            threading.Thread(target=_work, daemon=True).start()
+
+            try:
+                s = spoken_q.get(timeout=FILLER_AFTER)   # 最初の一文を待つ
+            except queue.Empty:
+                if fillers:                              # 0.9秒で来なければ相槌で間を埋める
+                    speak_mod._play_wav(random.choice(fillers))
+                s = spoken_q.get()
+            spoke_any = False
+            while s is not None:                          # 文を順番に読み上げ（各文の合成がブロック＝順序保証）
+                speak_mod.speak(s, block=True)
+                spoke_any = True
+                s = spoken_q.get()
+
             if "e" in box:
                 raise box["e"]
             result = box["r"]
-
             history = result["history"]
             reply = result["reply"]
             print(f"MyAgent: {reply}", flush=True)
-            u = result.get("usage", {})
-            if u:
-                print(f"  (¥{u.get('yen', 0)} / {u.get('calls', 0)}コール)", flush=True)
-            speak_mod.speak(reply, block=True)  # 読み上げ中はマイクを開かない＝自分の声で誤起動しない
-            awake_until = time.time() + AWAKE_WINDOW  # 対話のたびに起動ウィンドウを延長
+            if not spoke_any and reply:                   # 予算上限など、ストリームを通らなかった返答
+                speak_mod.speak(reply, block=True)
+            c = result.get("cost") or {}
+            if c:
+                print(f"  (¥{c.get('turn', 0)} / 今月¥{c.get('month', 0)}/{c.get('budget', 300)})", flush=True)
+            awake_until = time.time() + AWAKE_WINDOW       # 対話のたびに起動ウィンドウを延長
 
             eph = result.get("ephemeral") or []
             if eph:  # このターンで開いた一時タブは次の発話の頭で閉じて画面を戻す

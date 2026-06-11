@@ -10,6 +10,7 @@ import calendar as _calendar
 import datetime
 import json
 import os
+import re
 from pathlib import Path
 
 # 企業/学校などTLS傍受プロキシ下でも、Python が OS の証明書ストア（Windowsの信頼ストア等）を
@@ -254,8 +255,13 @@ _SAVE_CLAIMS = ("覚えました", "覚えておきました", "記憶しまし�
                 "保存しました", "メモしました", "セットしました", "記録しました")
 
 
-def run_turn(client, persona: str, user_input: str, dry_run: bool = False, history=None) -> dict:
+def run_turn(client, persona: str, user_input: str, dry_run: bool = False, history=None,
+             on_sentence=None) -> dict:
     """1ターン処理。{"actions": [...], "reply": "...", "history": [...]} を返す（Step5(a) 会話記憶）。
+
+    on_sentence: コールバックを渡すと、最終応答をストリーミングし「一文できるたび」に呼ぶ
+    （voice.py が即 VOICEVOX へ流して喋り出す＝体感レイテンシ短縮・#34）。返答の最後で、
+    まだ喋っていないフォールバック文（言い換え等）があれば1回だけ呼ぶ。
 
     history（直近の会話、user/assistantのテキストのみ）を前置きしてモデルに渡すことで、
     「それで行こう」「さっきの」などターンまたぎの参照が通る。返り値の history を呼び出し側が
@@ -292,6 +298,46 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
         usage["cw"] += getattr(u, "cache_creation_input_tokens", 0) or 0
         usage["cr"] += getattr(u, "cache_read_input_tokens", 0) or 0
         usage["calls"] += 1
+
+    # ストリーミング発声（#34）。最終応答を文単位で on_sentence へ流す。
+    streamed = {"text": ""}     # これまでに発声へ流した本文（フォールバックの二重発声を避けるため記録）
+    _SENT_END = re.compile(r"[。！？!?\n]")
+
+    def _emit(buf: dict) -> None:
+        """バッファから完成した文を取り出して on_sentence に渡す（句点区切り）。"""
+        while True:
+            m = _SENT_END.search(buf["t"])
+            if not m:
+                break
+            i = m.end()
+            s = buf["t"][:i].strip()
+            buf["t"] = buf["t"][i:]
+            if s:
+                streamed["text"] += s
+                on_sentence(s)
+
+    def _call(msgs, max_tokens, tool_choice=None):
+        """モデル呼び出し。on_sentence があれば本文をストリームして文ごとに発声する。"""
+        kw = dict(model=MODEL, max_tokens=max_tokens, system=system_prompt,
+                  tools=tools.TOOL_DEFS, messages=msgs)
+        if tool_choice:
+            kw["tool_choice"] = tool_choice
+        if on_sentence and not dry_run:
+            buf = {"t": ""}
+            with client.messages.stream(**kw) as stream:
+                for delta in stream.text_stream:
+                    buf["t"] += delta
+                    _emit(buf)
+                last = buf["t"].strip()       # 句点で終わらない最後の断片
+                if last:
+                    streamed["text"] += last
+                    on_sentence(last)
+                msg = stream.get_final_message()
+            _acc(msg)
+            return msg
+        r = client.messages.create(**kw)
+        _acc(r)
+        return r
 
     def _force_save(claim_reply: str) -> "str | None":
         """「保存しました」と言ったのにツールを呼んでいない時、ツールを強制して本当に保存させる。"""
@@ -348,6 +394,11 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
             forced = _force_save(reply)
             if forced:
                 reply = forced
+        # ストリームで未発声の返答（言い換え・ツール結果フォールバック等）は、ここで1回だけ発声する。
+        # 通常のストリーム成功時は reply == streamed["text"] なので二重に喋らない。
+        if on_sentence and not dry_run and reply and reply.strip() != streamed["text"].strip():
+            on_sentence(reply)
+
         new_history = (history + [
             {"role": "user", "content": user_input},
             {"role": "assistant", "content": reply},
@@ -362,10 +413,7 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     # 複数ステップが1ターン内で完結する（旧実装は1ラウンドで打ち切り、2手目のtool_useを捨てていた）。
     response = None
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.messages.create(
-            model=MODEL, max_tokens=400, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
-        )
-        _acc(response)
+        response = _call(messages, 400)  # tool_use ならテキストは流れず、終端テキストなら文ごとに発声
         if response.stop_reason != "tool_use":
             return _finish(_text_of(response))
 
@@ -394,11 +442,7 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
 
     # 上限まで回しても止まらなかった：最後に締めの一言だけ書かせる
     # （tools を外すとprefixが変わりキャッシュmissになるので、付けたまま tool_choice=none で封じる）
-    final = client.messages.create(
-        model=MODEL, max_tokens=300, system=system_prompt,
-        tools=tools.TOOL_DEFS, tool_choice={"type": "none"}, messages=messages
-    )
-    _acc(final)
+    final = _call(messages, 300, tool_choice={"type": "none"})
     reply = _text_of(final)
     if reply == "（…）" and actions:  # 実行後にモデルが何も言わなかった時の保険：ツール結果を返答に使う
         reply = actions[-1]["result"]
