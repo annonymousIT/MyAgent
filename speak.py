@@ -94,12 +94,20 @@ def _voicevox_speak(text: str) -> bool:
                 pass
 
 
+def _say_pauses(text: str) -> str:
+    """say は句読点をほぼ素通りするので、文末・読点に無音([[slnc ms]])を挿し込んで間を作る。"""
+    text = re.sub(r"([。！？!?])", r"\1[[slnc 380]]", text)
+    text = re.sub(r"([、,])", r"\1[[slnc 130]]", text)
+    return text
+
+
 def _os_speak(text: str) -> None:
     """OS標準の音声合成（VOICEVOX が無いときのフォールバック）。"""
     try:
         if IS_MAC:
-            # 日本語ボイス指定（英語ボイスだと日本語が記号読みになる）。無ければ素のsayにフォールバック。
-            if subprocess.run(["say", "-v", SAY_VOICE, text], check=False).returncode != 0:
+            # 日本語ボイス＋文間の無音挿入。英語ボイスだと記号読みになるので -v 指定。無ければ素のsayへ。
+            spoken = _say_pauses(text)
+            if subprocess.run(["say", "-v", SAY_VOICE, spoken], check=False).returncode != 0:
                 subprocess.run(["say", text], check=False)
         elif IS_WINDOWS:
             # シングルクオートをエスケープして PowerShell の SAPI に渡す
