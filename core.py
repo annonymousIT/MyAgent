@@ -84,7 +84,16 @@ def static_menu() -> str:
     """
     cfg = tools.load_config()
     sites = "、".join(cfg.get("sites", {}).keys())
-    apps = "、".join(cfg.get("apps", {}).keys())
+    # プロンプトには「声で呼びそう」なカテゴリのアプリだけ載せる（UWPのドライバ/ユーティリティ等の
+    # ノイズ130個を全列挙すると入力トークンを食い、冷キャッシュ課金とTTFTが悪化するため）。
+    # resolver は全アプリを保持するので、ここに無いアプリも起動できる（万能感は維持）。
+    _VOICE_CATS = {"動画", "通話", "メール", "勉強", "音楽", "ブラウザ", "カレンダー", "ゲーム", "仕事"}
+    _cand = [(n, v) for n, v in cfg.get("apps", {}).items()
+             if not isinstance(v, dict) or v.get("category") in _VOICE_CATS]
+    # 別名持ち（＝声で呼ぶ想定が強い）を優先して cap に収める（Spotify 等が溢れて落ちないように）
+    _aliased = [n for n, v in _cand if isinstance(v, dict) and v.get("aliases")]
+    _rest = [n for n, v in _cand if not (isinstance(v, dict) and v.get("aliases"))]
+    apps = "、".join((_aliased + _rest)[:48])
     system = "、".join(list(cfg.get("system", {}).keys()) + list(cfg.get("dangerous_system", {}).keys()))
     return (
         "[Capabilities]\n"
@@ -126,8 +135,11 @@ def static_menu() -> str:
         "- Keep replies 1-2 sentences for actions; up to 3 short sentences when weaving weather+schedule. "
         "No bullet lists or markdown in replies — natural speech only (it may be read aloud by TTS).\n"
         f"- open_site names: {sites}\n"
-        f"- launch_app names (also openable by alias/reading; resolver handles it): {apps}\n"
-        f"- run_system names: {system}"
+        "- launch_app: pass the app name as the user said it (Japanese reading, nickname, or English). "
+        "The resolver matches ANY installed app by name/alias/reading, so you can open apps beyond the "
+        "examples here — just try it; it honestly returns not-found if truly absent. Don't refuse before trying. "
+        f"Common installed apps: {apps}\n"
+        f"- run_system names (and you may also: ロック/スクリーンショット/再生/一時停止/次の曲/前の曲): {system}"
     )
 
 

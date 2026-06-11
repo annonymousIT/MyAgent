@@ -276,18 +276,32 @@ def monitor_count() -> int:
 # --------------------------------------------------------------------------
 # システム操作（音量・モニタ・スリープ等）— nircmd 不要のネイティブ実装
 # --------------------------------------------------------------------------
-_VK = {"volume_down": 0xAE, "volume_up": 0xAF, "mute": 0xAD, "unmute": 0xAD}
+_VK = {"volume_down": 0xAE, "volume_up": 0xAF, "mute": 0xAD, "unmute": 0xAD,
+       "media_playpause": 0xB3, "media_next": 0xB0, "media_prev": 0xB1}
 _VOL_STEPS = 5  # 1回の「音量下げる/上げる」で送るキー回数（1回≈2%）
+
+
+def _tap(vk: int) -> None:
+    user32.keybd_event(vk, 0, 0, 0)   # down
+    user32.keybd_event(vk, 0, 2, 0)   # up (KEYEVENTF_KEYUP)
 
 
 def system_action(action: str) -> bool:
     """正規化済みアクションを実行。対応してなければ False（呼び出し側がconfig文字列へフォールバック）。"""
     if action in _VK:
-        vk = _VK[action]
         times = _VOL_STEPS if action in ("volume_down", "volume_up") else 1
         for _ in range(times):
-            user32.keybd_event(vk, 0, 0, 0)   # down
-            user32.keybd_event(vk, 0, 2, 0)   # up (KEYEVENTF_KEYUP)
+            _tap(_VK[action])
+        return True
+    if action == "lock":
+        user32.LockWorkStation()
+        return True
+    if action == "screenshot":
+        # Win+PrtScn ＝ スクショを Pictures\Screenshots に自動保存
+        VK_LWIN, VK_SNAPSHOT = 0x5B, 0x2C
+        user32.keybd_event(VK_LWIN, 0, 0, 0)
+        _tap(VK_SNAPSHOT)
+        user32.keybd_event(VK_LWIN, 0, 2, 0)
         return True
     if action == "monitor_off":
         # 画面を省電力オフ（HWND_BROADCAST に WM_SYSCOMMAND/SC_MONITORPOWER, 2=オフ）
