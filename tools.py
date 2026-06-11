@@ -299,6 +299,32 @@ def get_weather(location: str) -> str:
     return f"天気（実データ）: {data}"
 
 
+def play_media(query: str, kind: str = "video") -> str:
+    """動画/音楽を検索ディープリンクで開いて『残す』（C・persistent / #22）。
+
+    「この動画」「あれ流して」→ 適切なサービスの検索URLを開く。
+    persistent（ADR-0021）なので _EPHEMERAL_OPENED に積まない＝自動クローズしない＝残す。
+    - video: YouTube 検索結果
+    - music: ネイティブ Spotify（spotify:search:）優先、無ければ Spotify Web 検索
+    """
+    q = (query or "").strip()
+    if not q:
+        return "何を再生するか分かりませんでした（曲名・動画名を教えてください）。"
+    k = (kind or "video").strip().lower()
+    if k in ("music", "song", "audio", "音楽", "曲"):
+        apps = load_config().get("apps", {})
+        if IS_MAC and _resolve_app(apps, "Spotify"):  # ネイティブSpotifyがあればアプリ内検索
+            subprocess.Popen(["open", f"spotify:search:{urllib.parse.quote(q)}"])
+            return f"Spotify で「{q}」を検索しました（流せます・残します）。"
+        url = "https://open.spotify.com/search/" + urllib.parse.quote(q)
+        webbrowser.open(url)
+        return f"Spotify（Web）で「{q}」を開きました（残します）。"
+    # 既定：動画 → YouTube 検索
+    url = "https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(q)
+    webbrowser.open(url)
+    return f"YouTube で「{q}」を検索して開きました（残します）。"
+
+
 def close_browser_tabs(urls: "list[str]") -> int:
     """指定URLに一致するブラウザタブを閉じる（ephemeralの後片付け・Mac/Chrome）。
 
@@ -411,6 +437,18 @@ TOOL_DEFS = [
             "required": ["url"],
         },
     },
+    {
+        "name": "play_media",
+        "description": "動画や音楽を検索して開く（開いたら残す＝自動で閉じない）。「〜の動画見たい」「〜流して/聴きたい」「あれ流して」などメディアを見聞きしたい時に使う。query は曲名・動画名・アーティスト等。kind は 'video'（YouTube）か 'music'（Spotify）。迷ったら video。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "曲名・動画名・アーティスト名など"},
+                "kind": {"type": "string", "enum": ["video", "music"], "description": "video=動画 / music=音楽"},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # ツール名 → 実関数
@@ -422,6 +460,7 @@ DISPATCH = {
     "open_url": open_url,
     "get_weather": get_weather,
     "fetch_page": fetch_page,
+    "play_media": play_media,
 }
 
 
