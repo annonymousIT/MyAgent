@@ -23,3 +23,6 @@ Thumbs.db
 
 # 実測コストログ（ローカル記録）
 costs.jsonl
+
+# ユーザー設定（声など・マシン固有）
+settings.json

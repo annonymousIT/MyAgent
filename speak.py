@@ -57,16 +57,44 @@ def clean_for_speech(text: str) -> str:
     return t
 
 
-def _vv_synth(text: str) -> "bytes | None":
+def _voice_cfg() -> "tuple[str, float, float]":
+    """発声設定（speaker, pitch, speed）を取得。優先順位：環境変数 > settings.json > 既定。
+
+    settings.json は overlay.py の設定画面が書き換える。ここで毎回読むので再起動なしで反映。
+    """
+    speaker, pitch, speed = VOICEVOX_SPEAKER, VOICEVOX_PITCH, VOICEVOX_SPEED
+    try:
+        import settings
+        s = settings.load()
+        speaker = os.environ.get("VOICEVOX_SPEAKER") or str(s.get("voicevox_speaker", speaker))
+        pitch = float(os.environ.get("VOICEVOX_PITCH", s.get("voicevox_pitch", pitch)))
+        speed = float(os.environ.get("VOICEVOX_SPEED", s.get("voicevox_speed", speed)))
+    except Exception:
+        pass
+    return speaker, pitch, speed
+
+
+def voice_enabled() -> bool:
+    """設定画面の音声トグル。環境変数 MYAGENT_VOICE=0 でも無効化できる。"""
+    if os.environ.get("MYAGENT_VOICE") == "0":
+        return False
+    try:
+        import settings
+        return bool(settings.load().get("voice_enabled", True))
+    except Exception:
+        return True
+
+
+def _vv_synth(text: str, speaker: str, pitch: float, speed: float) -> "bytes | None":
     """1チャンクを VOICEVOX で合成して WAV を返す。失敗（エンジン未起動含む）は None。"""
     try:
-        q = urllib.parse.urlencode({"text": text, "speaker": VOICEVOX_SPEAKER})
+        q = urllib.parse.urlencode({"text": text, "speaker": speaker})
         req = urllib.request.Request(f"{VOICEVOX_URL}/audio_query?{q}", method="POST")
         query = json.loads(urllib.request.urlopen(req, timeout=2).read())
-        query["pitchScale"] = VOICEVOX_PITCH
-        query["speedScale"] = VOICEVOX_SPEED
+        query["pitchScale"] = pitch
+        query["speedScale"] = speed
         req2 = urllib.request.Request(
-            f"{VOICEVOX_URL}/synthesis?speaker={VOICEVOX_SPEAKER}",
+            f"{VOICEVOX_URL}/synthesis?speaker={speaker}",
             data=json.dumps(query).encode("utf-8"),
             headers={"Content-Type": "application/json"}, method="POST",
         )
@@ -97,10 +125,11 @@ def _play_wav(wav: bytes) -> None:
 def _voicevox_speak(text: str) -> bool:
     """VOICEVOX で読み上げ。文ごとにストリーミング（最初の一文を合成したら即再生し、
     残りは裏で合成）→ 体感の出だしが速い。成功 True / エンジン未起動など False（→sayへ）。"""
+    speaker, pitch, speed = _voice_cfg()
     parts = [p for p in re.split(r"(?<=[。！？!?])", text) if p.strip()]
     if not parts:
         parts = [text]
-    first = _vv_synth(parts[0])
+    first = _vv_synth(parts[0], speaker, pitch, speed)
     if first is None:
         return False  # エンジン未起動 → 呼び出し側で say フォールバック
     import queue as _queue
@@ -109,7 +138,7 @@ def _voicevox_speak(text: str) -> bool:
 
     def _produce() -> None:
         for p in parts[1:]:
-            q.put(_vv_synth(p))
+            q.put(_vv_synth(p, speaker, pitch, speed))
         q.put(None)
 
     threading.Thread(target=_produce, daemon=True).start()  # 残りを裏で合成
@@ -174,7 +203,7 @@ def speak(text: str, block: bool = True) -> None:
 
     block=False で別スレッド発声（Web UI が返答表示で待たされないように）。
     """
-    if not text:
+    if not text or not voice_enabled():  # 設定画面の音声トグル（OFFなら黙る）
         return
     text = clean_for_speech(text)  # 顔文字・三点リーダ・絵文字を除去（音声だけ・表示はそのまま）
     if not text:
