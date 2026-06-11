@@ -85,8 +85,9 @@ def _find_wake(text: str) -> "str | None":
     return n[m.end():].lstrip("、,。.！!？? 　")
 
 # 返答を声で届ける前提の追加指示（personaに連結＝音声セッション専用の安定プレフィックス）
-VOICE_HINT = ("\n[Voice mode] The reply is spoken aloud by TTS. Keep it to 1-2 short sentences. "
-              "No lists, no markdown, no URLs.")
+VOICE_HINT = ("\n[Voice mode] Your reply is read aloud, so be SHORT: one sentence (two only if truly "
+              "necessary). Put the point in the first sentence and end cleanly — no lists, markdown, URLs, "
+              "and don't stack extra questions or nagging on the end. Brevity over completeness.")
 
 # 一時タブを閉じたあと「画面を戻す」対象にしないアプリ（ブラウザ自身など）
 _NO_RESTORE = {"Google Chrome", "Safari", "app_mode_loader"}
@@ -212,34 +213,55 @@ def main() -> None:
 
             front = tools._front_process() if speak_mod.IS_MAC else ""
 
-            # ストリーミング発声（#34）：LLMの返事を別スレッドで回し、文が出来た端から
-            # キューへ。ここ（メインスレッド）が順番に読み上げる＝順序保証＆読み上げ中はマイクを
-            # 開かない（自分の声での誤起動を防ぐ）。最初の一文が遅ければ相槌で間を埋める。
-            spoken_q: "queue.Queue" = queue.Queue()
+            # ストリーミング＋合成先回り（#34）：LLMは文ができた端から sent_q へ。合成スレッドが
+            # 各文を WAV 化して wav_q へ（＝次の文を裏で合成）。メインは出来た WAV を順に再生する。
+            # → 1文目を喋っている間に2文目を合成済みにでき、文と文の“間”が消える（ブツ切り解消）。
+            _vcfg = speak_mod._voice_cfg()
+            sent_q: "queue.Queue" = queue.Queue()
+            wav_q: "queue.Queue" = queue.Queue()
             box: dict = {}
 
             def _work() -> None:
                 try:
                     box["r"] = core.run_turn(client, persona, text, dry_run=False,
-                                             history=history, on_sentence=spoken_q.put)
+                                             history=history, on_sentence=sent_q.put)
                 except Exception as e:  # noqa: BLE001
                     box["e"] = e
                 finally:
-                    spoken_q.put(None)  # 終端（例外時も必ず置く）
+                    sent_q.put(None)
+
+            def _synth() -> None:                         # 文を先回りで合成し続ける
+                while True:
+                    s = sent_q.get()
+                    if s is None:
+                        break
+                    cleaned = speak_mod.clean_for_speech(s)
+                    wav = speak_mod._vv_synth(cleaned, *_vcfg) if cleaned else None
+                    wav_q.put((s, wav))
+                wav_q.put(None)
 
             threading.Thread(target=_work, daemon=True).start()
+            threading.Thread(target=_synth, daemon=True).start()
 
-            try:
-                s = spoken_q.get(timeout=FILLER_AFTER)   # 最初の一文を待つ
-            except queue.Empty:
-                if fillers:                              # 0.9秒で来なければ相槌で間を埋める
-                    speak_mod._play_wav(random.choice(fillers))
-                s = spoken_q.get()
             spoke_any = False
-            while s is not None:                          # 文を順番に読み上げ（各文の合成がブロック＝順序保証）
-                speak_mod.speak(s, block=True)
-                spoke_any = True
-                s = spoken_q.get()
+            first = True
+            while True:
+                try:
+                    item = wav_q.get(timeout=FILLER_AFTER) if first else wav_q.get()
+                except queue.Empty:
+                    if fillers:                           # 最初の音が0.9秒で来なければ相槌で間を埋める
+                        speak_mod._play_wav(random.choice(fillers))
+                    item = wav_q.get()
+                first = False
+                if item is None:
+                    break
+                s, wav = item
+                if wav:                                   # 合成済み → 即再生（合成待ちゼロ＝なめらか）
+                    speak_mod._play_wav(wav)
+                    spoke_any = True
+                elif s:                                   # 合成失敗（エンジン落ち等）→ OS音声でフォールバック
+                    speak_mod.speak(s, block=True)
+                    spoke_any = True
 
             if "e" in box:
                 raise box["e"]
