@@ -27,7 +27,9 @@ IS_MAC = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 
 VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://127.0.0.1:50021").rstrip("/")
-VOICEVOX_SPEAKER = os.environ.get("VOICEVOX_SPEAKER", "3")
+# 既定 6=四国めたん(ツンツン)。ちょい毒舌・世話焼きの女性人格に合わせた選択（ADR-0031）。
+# 変えたいときは環境変数 VOICEVOX_SPEAKER で（例: 18=九州そら ツンツン, 9=波音リツ クール）。
+VOICEVOX_SPEAKER = os.environ.get("VOICEVOX_SPEAKER", "6")
 
 
 def _voicevox_speak(text: str) -> bool:

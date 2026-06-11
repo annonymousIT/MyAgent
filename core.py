@@ -157,9 +157,26 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
                 saved = result
         return saved
 
+    def _rephrase(result: str) -> str:
+        """ツール結果を人格・口調で一言に言い換える（無言フォールバックでロボ口調が漏れるのを防ぐ）。"""
+        try:
+            r = client.messages.create(
+                model=MODEL, max_tokens=150, system=system_prompt,
+                messages=[
+                    {"role": "user", "content": user_input},
+                    {"role": "user", "content": f"（システム）今の操作の結果はこうです:「{result}」。"
+                     "事実は変えずに、これをあなたの口調・人格でマスターへ一言だけ伝えてください。"},
+                ],
+            )
+            t = _text_of(r)
+            return t if t != "（…）" else result
+        except Exception:
+            return result
+
     def _finish(reply: str) -> dict:
-        if reply == "（…）" and actions:  # ツール実行後にモデルが無言だった時の保険：直近のツール結果を返答に使う
-            reply = actions[-1]["result"]
+        if reply == "（…）" and actions:  # ツール実行後にモデルが無言だった時の保険
+            # 実モードは素のツール結果でなく人格で言い換える（dry_runは検証用に素のまま）
+            reply = actions[-1]["result"] if dry_run else _rephrase(actions[-1]["result"])
         # 捏造ガード：保存完了を口にしたのに保存ツールを呼んでいない → 強制実行して本当に保存する（ADR-0030）
         if (not dry_run and not any(a["tool"] in _SAVE_TOOLS for a in actions)
                 and any(p in reply for p in _SAVE_CLAIMS)):
