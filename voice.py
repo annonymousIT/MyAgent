@@ -133,14 +133,19 @@ def _record_utterance(stream: "sd.InputStream") -> "np.ndarray | None":
 
 def _build_vocab_hint() -> str:
     """Whisper の initial_prompt 用の語彙ヒント。想定する命令語・アプリ名を先に教えて誤認識を減らす
-    （例「メモ」が「イメ無」になるのを抑える）。長すぎると逆効果なので要点だけ。"""
-    words = ["やっほーエージェント", "メモ", "音量", "画面", "天気", "予定", "スクショ", "再生",
-             "次の曲", "ロック", "開いて", "閉じて", "起動して", "ただいま", "おはよう", "おやすみ", "終了"]
+    （例「メモ」→「目も」、「電卓」→「電端」を抑える）。
+
+    アプリは「別名持ち（＝声で呼ぶ想定）」だけを入れる。スキャンが拾った Magnify/Narrator 等の
+    ノイズで埋めると肝心の電卓・ディスコード等が圏外になり逆効果なため。長すぎても薄まるので要点だけ。
+    """
+    words = ["やっほーエージェント", "メモ", "電卓", "音量", "画面", "天気", "予定", "スクショ", "再生",
+             "次の曲", "ロック", "ミュート", "開いて", "閉じて", "起動して", "止めて", "教えて",
+             "ただいま", "おはよう", "おやすみ", "終了", "ディスコード", "スポティファイ", "ユーチューブ"]
     try:
         import tools
         for n, v in tools.load_config().get("apps", {}).items():
-            words.append(n)
-            if isinstance(v, dict) and v.get("aliases"):
+            if isinstance(v, dict) and v.get("aliases"):  # 別名持ち＝声で呼ぶ想定のアプリだけ
+                words.append(n)
                 words.append(v["aliases"][0])
     except Exception:
         pass
@@ -148,7 +153,7 @@ def _build_vocab_hint() -> str:
     for w in words:
         if w and w not in seen:
             seen.append(w)
-    return "、".join(seen[:45])
+    return "、".join(seen[:48])
 
 
 def _transcribe(model, audio_i16: "np.ndarray", hint: str = "") -> str:
@@ -159,9 +164,26 @@ def _transcribe(model, audio_i16: "np.ndarray", hint: str = "") -> str:
 
 
 def _is_noise(text: str) -> bool:
-    if len(text) < 2:
+    """音楽/環境音に対する Whisper の幻聴を弾く（音楽再生中にマイクが拾うと頻発する）。"""
+    t = text.strip()
+    if len(t) < 2:
         return True
-    return any(h in text for h in _HALLUCINATIONS) and len(text) < 20
+    if any(h in t for h in _HALLUCINATIONS) and len(t) < 20:
+        return True
+    if re.fullmatch(r"[\d\s,.\-]+", t):  # 数字だけ（「2002353535」等）
+        return True
+    # 反復ノイズ：記号・空白を除いて最頻文字が半分近く（「i-e-e-e-e…」等）
+    compact = re.sub(r"[\s\-ーｰ、。,.!?！？]", "", t)
+    if len(compact) >= 12 and max((compact.count(c) for c in set(compact)), default=0) / len(compact) > 0.45:
+        return True
+    # 同じ語の多数反復（「Modelゲーム」が何度も、等）
+    for w in set(re.findall(r"[A-Za-z]{3,}|[一-龯ぁ-んァ-ヶ]{2,}", t)):
+        if t.count(w) >= 4:
+            return True
+    # 日本語が一切無く長い＝英語の幻聴（ユーザーは日本語話者）
+    if len(t) > 14 and not re.search(r"[ぁ-んァ-ヶ一-龯]", t):
+        return True
+    return False
 
 
 def main() -> None:
