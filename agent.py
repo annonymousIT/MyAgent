@@ -1,40 +1,38 @@
-"""音声操作エージェント Step1（テキスト入力版）。
+"""音声操作エージェント — ターミナル入力版。
 
 ターミナルで起動すると入力待ちになる。日本語で話しかけると、Claude が意図を判断して
-ツール（サイト/アプリ起動・システム操作）を実行し、敬語の世話焼き人格で一言返す。
+ツール（サイト/アプリ起動・システム操作・ウィンドウ配置・天気・記憶…）を実行し、人格で返す。
+
+頭脳・予算管理・コスト記録はすべて core.run_turn に集約（web.py / voice.py と同じ）。
+このファイルは「入力 → run_turn → 表示＋発声」だけの薄い UI。
 """
 
-import os
-import sys
-from pathlib import Path
+from __future__ import annotations
 
-import anthropic
-
-import tools
+import core
 import speak as speak_mod
-
-MODEL = "claude-haiku-4-5"
-PERSONA_PATH = Path(__file__).parent / "persona.txt"
 
 # 返事を音声でも読み上げるか（実行中に「音声オフ」「音声オン」で切替可）
 VOICE_ENABLED = True
 
 
-def load_persona() -> str:
-    return PERSONA_PATH.read_text(encoding="utf-8").strip()
-
-
 def main():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("環境変数 ANTHROPIC_API_KEY が未設定です。先にAPIキーをセットしてください。")
-        sys.exit(1)
-
-    client = anthropic.Anthropic(api_key=api_key)
-    persona = load_persona()
+    try:
+        client = core.build_client()  # 環境変数 or .env から APIキー
+    except RuntimeError as e:
+        print(f"⚠ {e}")
+        return
+    persona = core.load_persona()
     voice_on = VOICE_ENABLED
+    history: list = []
 
-    print("🤖 起動しました。話しかけてください（終了は exit / quit、音声切替は 音声オフ / 音声オン）。")
+    # 起動時に今月の予算状況を一言出す（使いすぎに気づける）
+    st = core.budget_status()
+    print(f"🤖 起動しました（今月 ¥{st['month']}/{st['budget']}・残 ¥{st['remaining']}）。"
+          "話しかけてください（終了 exit、音声切替 音声オフ/音声オン）。")
+    if st["state"] == "blocked":
+        print("⚠ 今月の予算上限に達しています。来月まで API 呼び出しは止まります。")
+
     while True:
         try:
             user_input = input("\n> ").strip()
@@ -51,58 +49,20 @@ def main():
             print(f"🤖 音声を{'オン' if voice_on else 'オフ'}にしました。")
             continue
 
-        reply = handle(client, persona, user_input)
-        print(f"🤖 {reply}")
-        if voice_on:
-            speak_mod.speak(reply)
+        result = core.run_turn(client, persona, user_input, history=history)
+        history = result.get("history", history)
 
+        for a in result.get("actions", []):  # どのツールが動いたか（実行ログ）
+            print(f"   ⚙ {a['result']}")
+        print(f"🤖 {result['reply']}")
 
-def handle(client, persona: str, user_input: str) -> str:
-    """1ターン処理：LLMにツール選択させ、実行し、結果を踏まえた返事を返す。"""
-    messages = [{"role": "user", "content": user_input}]
+        c = result.get("cost")  # 実測コスト＋今月の予算状況
+        if c:
+            mark = {"warn": "⚠", "blocked": "⛔"}.get(c.get("state"), "")
+            print(f"   💴 ¥{c['turn']}｜今月 ¥{c['month']}/{c['budget']}（残 ¥{c['remaining']}）{mark}")
 
-    # 1回目：ツールを選ばせる
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=300,
-        system=persona,
-        tools=tools.TOOL_DEFS,
-        messages=messages,
-    )
-
-    # ツールを使わず返事だけのケース（「おはよ」など）
-    if response.stop_reason != "tool_use":
-        return _text_of(response)
-
-    # ツール実行 → 結果を返してもう一度返事を生成させる
-    messages.append({"role": "assistant", "content": response.content})
-    tool_results = []
-    for block in response.content:
-        if block.type == "tool_use":
-            result = tools.run_tool(block.name, block.input)
-            print(f"   ⚙ {result}")
-            tool_results.append(
-                {"type": "tool_result", "tool_use_id": block.id, "content": result}
-            )
-
-    # 実 tool_use ブロックが無いときは空contentでの再呼び出し（API 400）を避ける。
-    if not tool_results:
-        return _text_of(response)
-    messages.append({"role": "user", "content": tool_results})
-
-    final = client.messages.create(
-        model=MODEL,
-        max_tokens=300,
-        system=persona,
-        tools=tools.TOOL_DEFS,
-        messages=messages,
-    )
-    return _text_of(final)
-
-
-def _text_of(response) -> str:
-    parts = [b.text for b in response.content if b.type == "text"]
-    return "".join(parts).strip() or "（…）"
+        if voice_on and result.get("reply"):
+            speak_mod.speak(result["reply"])
 
 
 if __name__ == "__main__":

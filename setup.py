@@ -17,6 +17,7 @@ import json
 import platform
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import anthropic
@@ -322,6 +323,14 @@ def write_auto_config(config: dict) -> None:
 def main() -> None:
     if not (IS_MAC or IS_WINDOWS):
         print(f"未対応のOSです（{platform.system()}）。Mac / Windows でのみ動作します。")
+        return
+
+    # 再実行ガード：既に config.auto.json があれば再分類しない（分類は課金されるため）。
+    # 作り直したいときだけ `python setup.py --force`。テスト時の無駄な API 消費を防ぐ。
+    force = "--force" in sys.argv
+    if AUTO_CONFIG_PATH.exists() and not force:
+        print(f"{AUTO_CONFIG_PATH.name} は既にあります。再生成（=再課金）はしません。")
+        print("作り直す場合のみ `python setup.py --force` を実行してください。")
         return
 
     print("インストール済みアプリをスキャンしています...")

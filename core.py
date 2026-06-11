@@ -6,6 +6,9 @@ UI（ターミナル / ブラウザ）が変わっても、ここは無変更で
 
 from __future__ import annotations
 
+import calendar as _calendar
+import datetime
+import json
 import os
 from pathlib import Path
 
@@ -164,6 +167,73 @@ def _cost_yen(u: dict) -> float:
            + u["cw"] * _PRICE["cw"] + u["cr"] * _PRICE["cr"]) / 1_000_000
     return usd * JPY_PER_USD
 
+
+# --------------------------------------------------------------------------
+# コスト管理（ADR-0033）— 記録・月集計・ハード上限を core に集約し、全入口に効かせる
+# --------------------------------------------------------------------------
+COSTS_PATH = BASE / "costs.jsonl"  # 1ターン1行の実測コスト（円）。gitignore対象。
+# 月の上限（円）。これを超えたら API を叩かない（テスト浪費・暴走課金の防波堤）。
+MONTHLY_BUDGET_YEN = float(os.environ.get("MYAGENT_MONTHLY_BUDGET_YEN", "300"))
+# 警告を出し始める割合（既定80%）。
+_WARN_RATIO = float(os.environ.get("MYAGENT_BUDGET_WARN_RATIO", "0.8"))
+
+
+def month_spent(now: "datetime.datetime | None" = None) -> float:
+    """今月これまでに使った実測コスト（円）を costs.jsonl から合算する。"""
+    now = now or datetime.datetime.now()
+    m_pref = now.strftime("%Y-%m")
+    total = 0.0
+    if COSTS_PATH.exists():
+        for line in COSTS_PATH.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if str(r.get("ts", "")).startswith(m_pref):
+                total += float(r.get("yen", 0) or 0)
+    return total
+
+
+def budget_status(now: "datetime.datetime | None" = None) -> dict:
+    """今月の使用額・残額・このペースでの着地額・状態を返す（UI/警告用）。"""
+    now = now or datetime.datetime.now()
+    month = month_spent(now)
+    remaining = MONTHLY_BUDGET_YEN - month
+    days_in_month = _calendar.monthrange(now.year, now.month)[1]
+    pace = month / now.day * days_in_month if now.day else month
+    state = "ok"
+    if month >= MONTHLY_BUDGET_YEN:
+        state = "blocked"
+    elif month >= MONTHLY_BUDGET_YEN * _WARN_RATIO:
+        state = "warn"
+    return {"month": round(month, 1), "budget": round(MONTHLY_BUDGET_YEN),
+            "remaining": round(remaining, 1), "pace": round(pace), "state": state}
+
+
+def _log_cost(usage: dict) -> dict:
+    """今ターンのコストを costs.jsonl に記録し、今日/今月/残額/状態を返す。
+
+    run_turn の中で必ず呼ぶ（agent/web/voice すべての入口がこの1か所を通る）。
+    web.py 側の二重記録は廃止し、ここを唯一の台帳にする。
+    """
+    now = datetime.datetime.now()
+    yen = float(usage.get("yen", 0) or 0)
+    with open(COSTS_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": now.isoformat(timespec="seconds"),
+                            "yen": yen, "calls": usage.get("calls", 0)}) + "\n")
+    today = 0.0
+    d_pref = now.strftime("%Y-%m-%d")
+    if COSTS_PATH.exists():
+        for line in COSTS_PATH.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if str(r.get("ts", "")).startswith(d_pref):
+                today += float(r.get("yen", 0) or 0)
+    st = budget_status(now)
+    return {"turn": round(yen, 2), "today": round(today, 1), **st}
+
 # 捏造ガード（ADR-0030）: 保存ツール／保存"完了"を断定する言い回し
 _SAVE_TOOLS = {"remember", "add_schedule", "forget"}
 _SAVE_CLAIMS = ("覚えました", "覚えておきました", "記憶しました", "登録しました", "登録完了",
@@ -183,6 +253,18 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     """
     actions = []
     history = list(history or [])
+
+    # 月予算のハード上限：超えていたら API を一切叩かず、人格で打ち切る（暴走課金・テスト浪費の防波堤）。
+    # dry_run（検証）は課金されないので通す。
+    if not dry_run:
+        st = budget_status()
+        if st["state"] == "blocked":
+            reply = (f"マスター、今月はもう{st['month']:.0f}円も使ってしまいました^^; "
+                     f"予算（{st['budget']}円）に達したので、今月のお喋りはここまでにさせてくださいね。来月またどうぞ。")
+            return {"actions": [], "reply": reply, "history": history, "ephemeral": [],
+                    "usage": {"in": 0, "out": 0, "cw": 0, "cr": 0, "calls": 0, "yen": 0.0},
+                    "cost": {"turn": 0.0, "today": 0.0, **st}, "blocked": True}
+
     system_prompt = build_system_prompt(persona)  # 人格 ＋ ②材料（利用可能な操作一覧）
     messages = history + [{"role": "user", "content": user_input}]
 
@@ -258,8 +340,9 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
         ])[-MAX_HISTORY_MESSAGES:]
         # ephemeral（今ターンで開いた一時タブのURL）も返す。呼び出し側が次ターンで閉じる（ADR-0021）。
         usage["yen"] = round(_cost_yen(usage), 3)  # 実測コスト（円）
+        cost = _log_cost(usage) if not dry_run else {"turn": usage["yen"], **budget_status()}
         return {"actions": actions, "reply": reply, "history": new_history,
-                "ephemeral": tools.pop_ephemeral_opened(), "usage": usage}
+                "ephemeral": tools.pop_ephemeral_opened(), "usage": usage, "cost": cost}
 
     # ツールが尽きる（テキストで返してくる）まで回す。これにより「起動→配置」のような
     # 複数ステップが1ターン内で完結する（旧実装は1ラウンドで打ち切り、2手目のtool_useを捨てていた）。
