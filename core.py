@@ -300,13 +300,17 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
         usage["calls"] += 1
 
     # ストリーミング発声（#34）。最終応答を文単位で on_sentence へ流す。
-    streamed = {"text": ""}     # これまでに発声へ流した本文（フォールバックの二重発声を避けるため記録）
+    streamed = {"text": "", "first_done": False}  # 発声済み本文＋最初のチャンクを出したか
     _SENT_END = re.compile(r"[。！？!?\n]")
+    # 最初のチャンクだけは読点「、」でも切って即発声する（「おはようございます、」で合成を開始
+    # ＝句点まで待つより数百ms〜1秒早く声が出る）。2チャンク目以降は句点区切りで自然に。
+    _FIRST_END = re.compile(r"[。！？!?\n、,]")
 
     def _emit(buf: dict) -> None:
-        """バッファから完成した文を取り出して on_sentence に渡す（句点区切り）。"""
+        """バッファから完成した文を取り出して on_sentence に渡す（初回は読点でも切る）。"""
         while True:
-            m = _SENT_END.search(buf["t"])
+            pat = _SENT_END if streamed["first_done"] else _FIRST_END
+            m = pat.search(buf["t"])
             if not m:
                 break
             i = m.end()
@@ -314,6 +318,7 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
             buf["t"] = buf["t"][i:]
             if s:
                 streamed["text"] += s
+                streamed["first_done"] = True
                 on_sentence(s)
 
     def _call(msgs, max_tokens, tool_choice=None):

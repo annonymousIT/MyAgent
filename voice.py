@@ -43,7 +43,7 @@ import tools
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 FRAME = SAMPLE_RATE * FRAME_MS // 1000           # 480 samples/frame
-SILENCE_MS = int(os.environ.get("SILENCE_MS", "600"))
+SILENCE_MS = int(os.environ.get("SILENCE_MS", "450"))  # 発話終了とみなす無音（600→450ms・体感短縮）
 SILENCE_FRAMES = SILENCE_MS // FRAME_MS
 PAD_FRAMES = 10                                   # 発話開始判定の前後バッファ
 MIN_SPEECH_FRAMES = 8                             # これ未満は雑音として無視
@@ -95,33 +95,36 @@ _NO_RESTORE = {"Google Chrome", "Safari", "app_mode_loader"}
 _vad = webrtcvad.Vad(int(os.environ.get("VAD_AGGRESSIVENESS", "2")))
 
 
-def _record_utterance() -> "np.ndarray | None":
-    """発話を1つ録音して int16 波形を返す。VAD で開始/終了を検出。"""
+def _record_utterance(stream: "sd.InputStream") -> "np.ndarray | None":
+    """発話を1つ録音して int16 波形を返す。VAD で開始/終了を検出。
+
+    stream は呼び出し側が開きっぱなしで持つ（毎回 open すると Windows/WASAPI で数百msかかり、
+    発話の頭が欠ける＆体感が遅くなるため・#34）。
+    """
     ring = collections.deque(maxlen=PAD_FRAMES)
     triggered = False
     voiced: "list[np.ndarray]" = []
     silence = 0
-    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME) as stream:
-        while True:
-            block, _ = stream.read(FRAME)
-            frame = block[:, 0]
-            if len(frame) < FRAME:
-                continue
-            is_speech = _vad.is_speech(frame.tobytes(), SAMPLE_RATE)
-            if not triggered:
-                ring.append((frame, is_speech))
-                if sum(s for _, s in ring) > 0.6 * ring.maxlen:
-                    triggered = True
-                    voiced.extend(f for f, _ in ring)
-                    ring.clear()
+    while True:
+        block, _ = stream.read(FRAME)
+        frame = block[:, 0]
+        if len(frame) < FRAME:
+            continue
+        is_speech = _vad.is_speech(frame.tobytes(), SAMPLE_RATE)
+        if not triggered:
+            ring.append((frame, is_speech))
+            if sum(s for _, s in ring) > 0.6 * ring.maxlen:
+                triggered = True
+                voiced.extend(f for f, _ in ring)
+                ring.clear()
+        else:
+            voiced.append(frame)
+            if is_speech:
+                silence = 0
             else:
-                voiced.append(frame)
-                if is_speech:
-                    silence = 0
-                else:
-                    silence += 1
-                    if silence > SILENCE_FRAMES:
-                        break
+                silence += 1
+                if silence > SILENCE_FRAMES:
+                    break
     if len(voiced) < MIN_SPEECH_FRAMES:
         return None
     return np.concatenate(voiced)
@@ -163,10 +166,23 @@ def main() -> None:
           f"（起動後{int(AWAKE_WINDOW)}秒は呼びかけ不要 / 「終了」で停止 / Ctrl+C でも可）", flush=True)
     speak_mod.speak(f"音声モードです。{WAKE_PHRASE}、と呼んでくださいね。", block=True)
 
+    # マイクは開きっぱなしで使い回す（毎回 open すると数百ms ロスし発話の頭も欠ける・#34）
+    mic = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME)
+    mic.start()
+
+    def _flush_mic() -> None:
+        """読み上げ中に溜まった音（自分の声）を捨てる＝自己反応・エコー誤起動を防ぐ。"""
+        try:
+            while mic.read_available >= FRAME:
+                mic.read(FRAME)
+        except Exception:
+            pass
+
     while True:
         try:
             print("🎤 …", end="\r", flush=True)
-            audio = _record_utterance()
+            _flush_mic()  # 直前の読み上げ中に溜まった音（自分の声）を捨ててから聞く
+            audio = _record_utterance(mic)
             if audio is None:
                 continue
             text = _transcribe(model, audio)

@@ -193,7 +193,7 @@ def launch_app(name: str) -> str:
     target = _app_target(entry)
     if not target:
         return f"『{name}』に対応するアプリが {CONFIG_HINT} にありません。"
-    if "(" in target:  # 旧Windows config 等の未設定プレースホルダ
+    if "(" in target and not target.startswith("shell:"):  # 旧config等の未設定プレースホルダ（shell:のAppIDは除外）
         return f"『{name}』のパスが未設定です（{CONFIG_HINT} を書き換えてください）。"
     exe = entry.get("exe", "") if isinstance(entry, dict) else ""
     already = _app_is_running(exe if IS_WINDOWS else target)  # 重複起動の判定（Step5(b)）

@@ -160,7 +160,45 @@ def scan_apps_windows() -> list[dict]:
         if not is_pwa:
             entry["exe"] = exe_name             # 起動中把握・終了・配置に使う（例 Discord.exe）
         found[name] = entry
+
+    # UWP/ストアアプリ（LINE・電卓・Xbox 等）は .lnk を持たないため Get-StartApps で補完する。
+    # 起動は os.startfile("shell:AppsFolder\\<AppID>")。同名は .lnk 側（exe情報あり）を優先。
+    for item in _scan_startapps():
+        name = item["name"]
+        if name in found or any(s in name.lower() for s in _WIN_SKIP):
+            continue
+        found[name] = item
     return list(found.values())
+
+
+def _scan_startapps() -> list[dict]:
+    """Get-StartApps で全アプリ（Win32+UWP）を列挙し、UWP系を shell:AppsFolder 起動形式で返す。"""
+    ps = ("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+          "Get-StartApps | ConvertTo-Json -Compress")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
+        data = json.loads(r.stdout) if r.stdout.strip() else []
+    except Exception as e:
+        print(f"  Get-StartApps の走査に失敗しました（{type(e).__name__}: {e}）。UWPアプリは対象外になります。")
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    out: list[dict] = []
+    for item in data:
+        name = (item.get("Name") or "").strip()
+        app_id = (item.get("AppID") or "").strip()
+        # AppID に "!" を含む＝UWP（例 Microsoft.WindowsCalculator_..!App）。
+        # それ以外（exeパスや .lnk 相当）は Start Menu スキャンで拾えているのでスキップ。
+        if not name or "!" not in app_id:
+            continue
+        out.append({
+            "name": name,
+            "target": f"shell:AppsFolder\\{app_id}",  # os.startfile で起動できる
+            "kind": "uwp",
+            "path": app_id,
+        })
+    return out
 
 
 # --------------------------------------------------------------------------
