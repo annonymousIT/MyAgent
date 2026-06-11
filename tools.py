@@ -326,13 +326,24 @@ def _weather_summary(loc: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+# 天気ページを「見せる」か。音声モード(voice.py)は読み上げが配信手段なのでタブを開かない(False)。
+SHOW_WEATHER_PAGE = True
+
+
+def activate_app(name: str) -> None:
+    """アプリを前面化（一時タブ後片付けの後に元の画面へ戻す用）。失敗しても無害。"""
+    if not IS_MAC or not name:
+        return
+    _osa(f'tell application "{name}" to activate')
+
+
 def get_weather(location: str = "") -> str:
     """指定地の天気（現在＋3日先までの3時間毎予報）を実データで取得して伝える（ADR-0021/0029）。
 
     - 「明日の天気」「明日雨大丈夫？」に答えられるよう、j1(JSON) で予報まで取る。
     - location が空ならプロファイルの既定地名（例: 茨木）を使う＝場所未指定でも答えられる。
     - 返り値の実データをモデルが日本語で要約して伝える（捏造防止）。
-    “見せる”用に天気ページもブラウザで開く（ephemeral：次ターンで自動クローズ）。
+    “見せる”用の天気ページは SHOW_WEATHER_PAGE が真の時だけ開く（音声モードは開かない）。
     """
     loc = (location or "").strip() or profile_store.default_location() or "現在地"
     enc = urllib.parse.quote(loc)
@@ -347,8 +358,9 @@ def get_weather(location: str = "") -> str:
             summary = f"天気（実データ・現在のみ）: {data}"
         except Exception as e:
             return f"{loc} の天気が取得できませんでした（{type(e).__name__}）。"
-    webbrowser.open(page)            # 見せる
-    _EPHEMERAL_OPENED.append(page)   # 用が済んだら次ターンで閉じる
+    if SHOW_WEATHER_PAGE:
+        webbrowser.open(page)            # 見せる
+        _EPHEMERAL_OPENED.append(page)   # 用が済んだら次ターンで閉じる
     return summary
 
 

@@ -3,23 +3,26 @@
 パイプライン: マイク → VAD(発話区間検出) → Whisper(ローカルSTT・無料) → core.run_turn
               → テキスト返答を表示 ＋ つむぎ(VOICEVOX)で読み上げ。
 
-設計:
-- core.run_turn を使う（web.py / agent.py と同じ中核）。耳と口を足しただけ。
-- STTはローカル(faster-whisper)＝API課金ゼロ。脳(haiku)のコストは従来通り。
-- 自分の発話で誤起動しないよう、読み上げ中はマイクを開かない（録音→処理→発話→録音…と直列）。
-- VOICEVOX未起動なら read 側は say にフォールバック（speak.py）。
+体感速度の工夫（ADR-0035 Update2）:
+- フィラー相槌: LLMが0.9秒で返らなければ、起動時に合成済みの短い相槌（「はい」等）を即再生
+  → 無音の待ちが消え、応答が速く感じる。
+- ウォームアップ: 起動時に Whisper と VOICEVOX を空回しして初回遅延をなくす。
+- 音声モードでは天気タブを開かない（読み上げが配信手段。tools.SHOW_WEATHER_PAGE=False）。
+- 前ターンで開いた一時タブ（web_search等）は次の発話の頭で自動クローズ→元のアプリへ画面を戻す。
+- 返答は短く（personaにVoice mode指示を追加注入）→ TTSも速い。
 
 起動: source .env && source .venv/bin/activate && python voice.py
-       （初回は Whisper モデルのDLあり。マイク許可を一度求められる）
-終了: 「終了」「バイバイ」と言う or Ctrl+C
-環境変数: WHISPER_MODEL(既定 small), VAD_AGGRESSIVENESS(0-3,既定2), SILENCE_MS(既定800)
+終了: 「終了」「バイバイ」（その一言だけ言う）or Ctrl+C
+環境変数: WHISPER_MODEL(既定 base), VAD_AGGRESSIVENESS(0-3,既定2), SILENCE_MS(既定600)
 """
 
 from __future__ import annotations
 
 import collections
 import os
+import random
 import sys
+import threading
 
 import numpy as np
 import sounddevice as sd
@@ -27,6 +30,7 @@ import webrtcvad
 
 import core
 import speak as speak_mod
+import tools
 
 SAMPLE_RATE = 16000
 FRAME_MS = 30
@@ -35,12 +39,24 @@ SILENCE_MS = int(os.environ.get("SILENCE_MS", "600"))
 SILENCE_FRAMES = SILENCE_MS // FRAME_MS
 PAD_FRAMES = 10                                   # 発話開始判定の前後バッファ
 MIN_SPEECH_FRAMES = 8                             # これ未満は雑音として無視
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")  # baseは小型で約4倍速・短い命令なら十分
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")  # baseは約5倍速・短い命令なら十分
 
-EXIT_WORDS = ("終了", "バイバイ", "ばいばい", "おやすみ")  # おやすみは挨拶もあるが終了も兼ねる運用
+# その一言だけ言ったときのみ終了（「ゲーム終了して」等の誤爆防止で完全一致）
+EXIT_WORDS = ("終了", "バイバイ", "ばいばい")
 RESET_WORDS = ("リセット", "忘れて", "履歴クリア")
 # Whisperが無音/雑音に対して吐く定番の幻聴。これらは無視する。
 _HALLUCINATIONS = ("ご視聴ありがとうございました", "ありがとうございました", "おわり", "(", "「")
+
+# LLM待ちを埋める相槌（起動時にVOICEVOXで合成してメモリに保持→即再生できる）
+FILLER_TEXTS = ("はい。", "ええと。", "ちょっと待ってくださいね。")
+FILLER_AFTER = 0.9  # 秒。これより早くLLMが返れば相槌なし
+
+# 返答を声で届ける前提の追加指示（personaに連結＝音声セッション専用の安定プレフィックス）
+VOICE_HINT = ("\n[Voice mode] The reply is spoken aloud by TTS. Keep it to 1-2 short sentences. "
+              "No lists, no markdown, no URLs.")
+
+# 一時タブを閉じたあと「画面を戻す」対象にしないアプリ（ブラウザ自身など）
+_NO_RESTORE = {"Google Chrome", "Safari", "app_mode_loader"}
 
 _vad = webrtcvad.Vad(int(os.environ.get("VAD_AGGRESSIVENESS", "2")))
 
@@ -93,14 +109,26 @@ def main() -> None:
     print("Whisper モデル読込中…（初回はDLあり）", flush=True)
     from faster_whisper import WhisperModel
     model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    # ウォームアップ（初回呼び出しの遅延をここで吸収）
+    list(model.transcribe(np.zeros(8000, dtype=np.float32), language="ja", beam_size=1)[0])
+
+    tools.SHOW_WEATHER_PAGE = False  # 音声モード: 天気は読み上げで届ける（タブを開かない）
+
+    # 相槌を事前合成（VOICEVOX未起動なら空＝相槌なしで動く）
+    fillers = [w for w in (speak_mod._vv_synth(t) for t in FILLER_TEXTS) if w]
+
     client = core.build_client()
-    persona = core.load_persona()
+    persona = core.load_persona() + VOICE_HINT
     history: list = []
-    print("🎤 音声入力モード。話しかけてください（「終了」で停止 / Ctrl+C でも可）", flush=True)
-    speak_mod.speak("音声入力モードになりました。マスター、話しかけてください。", block=True)
+    pending_eph: list = []   # 前ターンで開いた一時タブ（次の発話の頭で閉じる）
+    pending_front = ""       # 一時タブを開く前に前面だったアプリ（閉じた後ここへ戻す）
+
+    print("🎤 音声入力モード。話しかけてください（「終了」だけ言うと停止 / Ctrl+C でも可）", flush=True)
+    speak_mod.speak("音声モード、どうぞ。", block=True)
 
     while True:
         try:
+            print("🎤 …", end="\r", flush=True)
             audio = _record_utterance()
             if audio is None:
                 continue
@@ -109,30 +137,59 @@ def main() -> None:
                 continue
             print(f"\nあなた: {text}", flush=True)
 
-            if any(w in text for w in EXIT_WORDS):
+            stripped = text.strip("。、！!？? 　")
+            if stripped in EXIT_WORDS:
                 speak_mod.speak("はい、おつかれさまでした。また呼んでくださいね。", block=True)
                 print("終了します。", flush=True)
                 break
-            if any(w == text.strip("。、 ") for w in RESET_WORDS):
+            if stripped in RESET_WORDS:
                 history = []
                 speak_mod.speak("会話の記憶をリセットしました。", block=True)
                 continue
 
-            result = core.run_turn(client, persona, text, dry_run=False, history=history)
+            # 前ターンの一時タブ（web_search等）をここで閉じ、元のアプリへ画面を戻す（ADR-0021）
+            if pending_eph:
+                closed = tools.close_browser_tabs(pending_eph)
+                if closed and pending_front and pending_front not in _NO_RESTORE:
+                    tools.activate_app(pending_front)
+                pending_eph, pending_front = [], ""
+
+            front = tools._front_process() if speak_mod.IS_MAC else ""
+
+            # LLMを別スレッドで回し、0.9秒で返らなければ相槌を即再生（無音の待ちを消す）
+            box: dict = {}
+
+            def _work() -> None:
+                try:
+                    box["r"] = core.run_turn(client, persona, text, dry_run=False, history=history)
+                except Exception as e:  # noqa: BLE001
+                    box["e"] = e
+
+            th = threading.Thread(target=_work, daemon=True)
+            th.start()
+            th.join(FILLER_AFTER)
+            if th.is_alive() and fillers:
+                speak_mod._play_wav(random.choice(fillers))
+            th.join()
+            if "e" in box:
+                raise box["e"]
+            result = box["r"]
+
             history = result["history"]
             reply = result["reply"]
             print(f"MyAgent: {reply}", flush=True)
-            c = result.get("usage", {})
-            if c:
-                print(f"  (¥{c.get('yen', 0)} / {c.get('calls', 0)}コール)", flush=True)
-            # 開いた一時タブの後片付け（次発話の頭で閉じる・ADR-0021）
-            for url_list in (result.get("ephemeral") or [],):
-                pass  # voice単体ではタブ台帳を持たないので即時クローズはしない（web.py用）
+            u = result.get("usage", {})
+            if u:
+                print(f"  (¥{u.get('yen', 0)} / {u.get('calls', 0)}コール)", flush=True)
             speak_mod.speak(reply, block=True)  # 読み上げ中はマイクを開かない＝自分の声で誤起動しない
+
+            eph = result.get("ephemeral") or []
+            if eph:  # このターンで開いた一時タブは次の発話の頭で閉じて画面を戻す
+                pending_eph, pending_front = eph, front
         except KeyboardInterrupt:
             print("\n終了します。", flush=True)
             break
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"⚠ {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             continue
 
