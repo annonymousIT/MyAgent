@@ -170,7 +170,10 @@ def main() -> None:
                 continue
             text = _transcribe(model, audio)
             if not text or _is_noise(text):
+                if text:
+                    print(f"🔉 聞こえた（雑音扱いで無視）: 「{text}」", flush=True)
                 continue
+            print(f"🔉 聞こえた: 「{text}」", flush=True)  # 認識した全発話を表示（デバッグ）
 
             # ウェイクワードのゲート（ADR-0038）。起動中ウィンドウ外で、ウェイクワードを含まない
             # 発話（ゲーム中の声・通話・独り言）は完全に無視する＝誤爆しない。
@@ -186,6 +189,7 @@ def main() -> None:
             elif now < awake_until:                # 起動中ウィンドウ → 呼びかけ不要で連続会話
                 text = _norm(text)
             else:                                  # 待機中 → 無視（誤爆防止の核）
+                print("   （待機中：ウェイクワード『エージェント』が無いので無視）", flush=True)
                 continue
             print(f"\nあなた: {text}", flush=True)
 
