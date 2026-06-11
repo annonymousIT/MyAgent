@@ -221,16 +221,29 @@ def context_text(now: "datetime.datetime | None" = None) -> str:
     else:
         lines.append("[About the user] nothing remembered yet (use remember to save).")
 
-    ups = upcoming(7, today)
-    if ups:
+    # ローカル予定 ＋ Googleカレンダー(iCal読み取り)をマージ（ADR-0034）。失敗しても落ちない。
+    ups = list(upcoming(7, today))
+    try:
+        import calendar_src
+        ups += calendar_src.upcoming_events(7, today)
+    except Exception:
+        pass
+    # 重複排除（同日・同時刻・同タイトル）＋ ソート
+    seen, merged = set(), []
+    for d, t, title in sorted(ups, key=lambda x: (x[0], x[1])):
+        k = (d, t, title)
+        if k not in seen:
+            seen.add(k)
+            merged.append(k)
+    if merged:
         rows = []
-        for d, t, title in ups:
+        for d, t, title in merged:
             rel = "今日" if d == today else ("明日" if d == today + datetime.timedelta(days=1) else "")
             label = f"{rel}{d.strftime('%m/%d')}({_WD_JA[d.weekday()]})"
             rows.append(f"{label} {t or '時刻未定'} {title}")
-        lines.append("[Next 7 days — all saved events]\n- " + "\n- ".join(rows))
+        lines.append("[Next 7 days — saved events + Google Calendar]\n- " + "\n- ".join(rows))
     else:
-        lines.append("[Next 7 days] none saved (if asked about plans, honestly say none).")
+        lines.append("[Next 7 days] none (if asked about plans, honestly say none).")
     lines.append("Never invent anything not in the memory/schedule above; if unknown, say 記憶にない or ask. "
                  "Judge 明日/今日 from [Now]; never compute dates yourself.")
     return "\n".join(lines)
