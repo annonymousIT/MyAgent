@@ -1,3 +1,7 @@
 anthropic>=0.40.0
 icalendar
 recurring_ical_events
+faster-whisper
+sounddevice
+webrtcvad
+numpy
