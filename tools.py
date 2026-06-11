@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import platform
 import re
 import subprocess
@@ -115,31 +116,41 @@ def _nfc(s: str) -> str:
     return unicodedata.normalize("NFC", s)
 
 
-def _resolve_app(apps: dict, name: str) -> "str | None":
-    """name（表示名 or エイリアス）から target を解決する。
+def _resolve_entry(apps: dict, name: str):
+    """name（表示名 or エイリアス）から apps の項目（dict or str）を解決する。
 
     解決順：表示名の完全一致 → エイリアス完全一致 → 表示名/エイリアスの大小無視一致。
     比較は常にNFC正規化して行う（macOSのNFDファイル名 vs LLMのNFC を吸収）。
-    site のキーは小文字（youtube/github 等）、アプリ表示名は大小混在（YouTube/GitHub）
-    なので、衝突検出やLLMの表記ゆれを拾えるよう最後に大小無視でも寄せる。
+    Windows では起動/終了/配置に exe 名が要るので、target だけでなく項目ごと返す必要がある。
     """
     target = _nfc(name)
     lower = target.lower()
     # 1) 表示名（キー）に完全一致（NFC）
     for key, entry in apps.items():
         if _nfc(key) == target:
-            return _app_target(entry)
+            return entry
     # 2) エイリアスに完全一致（NFC）
     for entry in apps.values():
         if isinstance(entry, dict) and any(_nfc(a) == target for a in (entry.get("aliases") or [])):
-            return _app_target(entry)
+            return entry
     # 3) 大小無視で表示名/エイリアスに一致（NFC）
     for key, entry in apps.items():
         if _nfc(key).lower() == lower:
-            return _app_target(entry)
+            return entry
         if isinstance(entry, dict) and any(_nfc(a).lower() == lower for a in (entry.get("aliases") or [])):
-            return _app_target(entry)
+            return entry
     return None
+
+
+def _resolve_app(apps: dict, name: str) -> "str | None":
+    """name から open -a / 起動 用の target 文字列を解決する（_resolve_entry の薄いラッパ）。"""
+    return _app_target(_resolve_entry(apps, name))
+
+
+def _app_exe(apps: dict, name: str) -> str:
+    """name から Windows の exe 名（例 Discord.exe）を解決する。無ければ空。"""
+    entry = _resolve_entry(apps, name)
+    return entry.get("exe", "") if isinstance(entry, dict) else ""
 
 
 def _app_matches(apps: dict, name: str) -> bool:
@@ -178,15 +189,19 @@ def launch_app(name: str) -> str:
     """
     cfg = load_config()
     apps = cfg.get("apps", {})
-    target = _resolve_app(apps, name)
+    entry = _resolve_entry(apps, name)
+    target = _app_target(entry)
     if not target:
         return f"『{name}』に対応するアプリが {CONFIG_HINT} にありません。"
     if "(" in target:  # 旧Windows config 等の未設定プレースホルダ
         return f"『{name}』のパスが未設定です（{CONFIG_HINT} を書き換えてください）。"
-    already = _app_is_running(target)  # 重複起動の判定（Step5(b)）
+    exe = entry.get("exe", "") if isinstance(entry, dict) else ""
+    already = _app_is_running(exe if IS_WINDOWS else target)  # 重複起動の判定（Step5(b)）
     try:
         if IS_MAC:
             subprocess.Popen(["open", "-a", target])  # 起動中なら前面化されるだけ（再起動しない）
+        elif IS_WINDOWS:
+            os.startfile(target)  # .lnk / .exe どちらもシェル経由で起動（既起動なら前面化）
         else:
             subprocess.Popen([target])
         if already:
@@ -450,6 +465,9 @@ def running_apps() -> "list[str]":
     （PWAの開閉確実性は launch_app の idempotent 起動＝開いていれば前面化、で担保する）。
     エージェントが「いま何が開いているか」を把握し、再起動や“やってない配置”の捏造を避けるための材料。
     """
+    if IS_WINDOWS:
+        import win_ops
+        return win_ops.running_apps(load_config())
     if not IS_MAC:
         return []
     seen, res = set(), []
@@ -566,6 +584,36 @@ _WINDOW_ACTIONS = {
 }
 
 
+def _manage_window_win(action: str, app: str = "") -> str:
+    """Windows のウィンドウ配置（ctypes 経由・win_ops に委譲）。Mac の純正タイル相当。
+
+    対象アプリが起動していなければ一度起動し、窓ができるのを待ってから配置する（Mac版と同じ自己修復）。
+    """
+    import win_ops
+    raw = (action or "").strip()
+    act = _WINDOW_ACTIONS.get(raw, raw.lower())
+    act = act if act in ("left", "right", "maximize", "center", "list") else raw.lower()
+    if act == "list":
+        return "、".join(running_apps()) or "(起動中のアプリは把握できませんでした)"
+    if act not in ("left", "right", "maximize", "center"):
+        return "未対応の操作です（left / right / maximize / center / list）。"
+
+    exe = ""
+    if app and app.strip():
+        exe = _app_exe(load_config().get("apps", {}), app)
+        # 対象が起動していなければ起動して窓の生成を待つ（PWA未起動でも自己修復）
+        if exe and not win_ops.app_is_running(exe):
+            launch_app(app)
+            time.sleep(1.3)
+
+    label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
+    ok, msg = win_ops.manage_window(act, exe)
+    if ok:
+        who = app.strip() if (app and app.strip()) else "最前面のウィンドウ"
+        return f"{who} を{label}に配置しました。"
+    return f"ウィンドウを{label}に配置できませんでした（{msg}）。"
+
+
 def manage_window(action: str, app: str = "", _relaunched: bool = False) -> str:
     """ウィンドウを配置する（A+D・要アクセシビリティ許可 / #23・ADR-0025）。
 
@@ -573,8 +621,10 @@ def manage_window(action: str, app: str = "", _relaunched: bool = False) -> str:
     app: 対象アプリ名（省略時は最前面のウィンドウ）。対象が開いていなければ自動で起動して並べる。
     メインディスプレイ前提（マルチモニタ配置は別トラック=Hammerspoon）。
     """
+    if IS_WINDOWS:
+        return _manage_window_win(action, app)
     if not IS_MAC:
-        return "ウィンドウ管理はいまの環境では未対応です（Mac のみ）。"
+        return "ウィンドウ管理はいまの環境では未対応です（Mac / Windows のみ）。"
     raw = (action or "").strip()
     act = _WINDOW_ACTIONS.get(raw, raw.lower())
     act = act if act in ("left", "right", "maximize", "center", "list") else raw.lower()
@@ -652,6 +702,20 @@ def manage_window(action: str, app: str = "", _relaunched: bool = False) -> str:
     return f"{proc} のウィンドウ操作に失敗しました（ウィンドウが無い可能性）。"
 
 
+def _close_app_win(name: str = "") -> str:
+    """Windows のアプリ終了（taskkill 経由・win_ops に委譲）。Mac の quit 相当。"""
+    import win_ops
+    target_name = (name or "").strip()
+    if not target_name:
+        return "何を閉じますか？（アプリ名やサイト名を教えてください）"
+    exe = _app_exe(load_config().get("apps", {}), target_name)
+    if exe and win_ops.close_exe(exe):
+        return f"{target_name} を閉じました。"
+    if exe:
+        return f"{target_name} は開いていないようです。"
+    return f"『{target_name}』に対応するアプリが見つかりませんでした。"
+
+
 def close_app(name: str = "") -> str:
     """開いているアプリ／サイトを閉じる（「YouTube閉じて」「Discordやめて」等）。
 
@@ -659,8 +723,10 @@ def close_app(name: str = "") -> str:
     - アプリ → quit（PWA/native とも）
     『閉じる/消す/やめる』の動詞をここで正しく受ける（モニタ消す等の誤爆防止）。
     """
+    if IS_WINDOWS:
+        return _close_app_win(name)
     if not IS_MAC:
-        return "閉じる操作はいまの環境では未対応です（Mac のみ）。"
+        return "閉じる操作はいまの環境では未対応です（Mac / Windows のみ）。"
     target_name = (name or "").strip()
     if not target_name:
         return "何を閉じますか？（アプリ名やサイト名を教えてください）"
@@ -722,7 +788,13 @@ def close_browser_tabs(urls: "list[str]") -> int:
 
 
 def _app_is_running(target: str) -> bool:
-    """アプリが既に起動中か（重複起動の判定・Mac）。権限不要の pgrep で判定。判定不能なら False。"""
+    """アプリが既に起動中か（重複起動の判定）。Mac=pgrep / Windows=tasklist。判定不能なら False。
+
+    Mac は target にアプリ名、Windows は exe 名（例 Discord.exe）を渡す前提。
+    """
+    if IS_WINDOWS:
+        import win_ops
+        return win_ops.app_is_running(target)
     if not IS_MAC:
         return False
     try:

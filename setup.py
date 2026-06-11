@@ -5,9 +5,10 @@
 手で書かずに自動生成する。誤りは config.user.json で上書きする（2層・user優先）。
 
 使い方:
-    source .env && source .venv/bin/activate && python setup.py
+    Mac:     source .env && source .venv/bin/activate && python setup.py
+    Windows: $env:ANTHROPIC_API_KEY=... ; python setup.py
 
-Mac専用（PWA/native を open -a で扱える）。WindowsはTODOスタブ。
+Mac は /Applications を open -a 用に、Windows はスタートメニュー .lnk を os.startfile 用にスキャンする。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import json
 import platform
 import re
+import subprocess
 from pathlib import Path
 
 import anthropic
@@ -92,11 +94,79 @@ def _add_app(found: dict[str, dict], app_path: Path, kind: str) -> None:
     }
 
 
+# スキャンから除外する名前の断片（アンインストーラ・ヘルプ・ドキュメント等のノイズ）
+_WIN_SKIP = (
+    "uninstall", "アンインストール", "setup", "セットアップ", "readme", "help", "ヘルプ",
+    "license", "ライセンス", "release notes", "documentation", "ドキュメント",
+    "website", "ホームページ", "report a", "modify",
+)
+
+
+def scan_apps_windows() -> list[dict]:
+    """スタートメニューの .lnk を列挙し、リンク先 exe を解決してアプリ一覧を作る（Windows）。
+
+    Mac の /Applications スキャンに対応する Windows 版。.lnk のリンク先解決は
+    WScript.Shell（COM）が確実なので、PowerShell で一括列挙＆解決して JSON で受け取る。
+    返り値の各要素: {"name", "target"(=.lnk), "exe", "kind"="native", "path"(=.lnk)}
+    """
+    ps = (
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+        "$dirs=@(\"$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs\","
+        "\"$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\"); "
+        "$ws=New-Object -ComObject WScript.Shell; $out=@(); "
+        "foreach($d in $dirs){ if(Test-Path $d){ "
+        "Get-ChildItem -Path $d -Recurse -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object{ "
+        "$t=''; $a=''; try{$s=$ws.CreateShortcut($_.FullName); $t=$s.TargetPath; $a=$s.Arguments}catch{}; "
+        "$out+=[pscustomobject]@{name=$_.BaseName; lnk=$_.FullName; target=$t; args=$a} } } }; "
+        "$out | ConvertTo-Json -Compress"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, encoding="utf-8", timeout=90,
+        )
+        data = json.loads(r.stdout) if r.stdout.strip() else []
+    except Exception as e:
+        print(f"  スタートメニューの走査に失敗しました（{type(e).__name__}: {e}）。")
+        return []
+    if isinstance(data, dict):  # 1件だけだと ConvertTo-Json はオブジェクト単体を返す
+        data = [data]
+
+    # Chrome/Edge の PWA は実体が共通プロキシ exe に潰れて区別できない（Mac の app_mode_loader と同じ）。
+    # → kind="pwa" にして exe を持たせない（起動は .lnk で可能、終了/配置は native のみ対象）。
+    _PWA_PROXIES = {"chrome_proxy.exe", "msedge_proxy.exe"}
+
+    found: dict[str, dict] = {}
+    for item in data:
+        name = (item.get("name") or "").strip()
+        lnk = item.get("lnk") or ""
+        target = item.get("target") or ""
+        args = (item.get("args") or "").lower()
+        if not name or not target.lower().endswith(".exe"):
+            continue  # exe を指さない .lnk（URL/ドキュメント等）は除外
+        if any(s in name.lower() for s in _WIN_SKIP):
+            continue
+        if name in found:
+            continue
+        exe_name = Path(target).name
+        is_pwa = exe_name.lower() in _PWA_PROXIES or "--app" in args
+        entry = {
+            "name": name,
+            "target": lnk,                      # os.startfile は .lnk を起動できる
+            "kind": "pwa" if is_pwa else "native",
+            "path": lnk,
+        }
+        if not is_pwa:
+            entry["exe"] = exe_name             # 起動中把握・終了・配置に使う（例 Discord.exe）
+        found[name] = entry
+    return list(found.values())
+
+
 # --------------------------------------------------------------------------
 # 2. 分類（Claude で category + 日本語エイリアス生成）
 # --------------------------------------------------------------------------
-_PROMPT_HEAD = """あなたはMac用音声エージェントのセットアップ補助です。
-以下はユーザーのMacにインストール済みのアプリ名の一覧です。
+_PROMPT_HEAD = """あなたはPC用音声エージェントのセットアップ補助です。
+以下はユーザーのPCにインストール済みのアプリ名の一覧です。
 各アプリについて、次の2つを生成してJSONで返してください。
 
 1. category: アプリの用途カテゴリ。次のいずれか1語を選ぶ:
@@ -220,17 +290,23 @@ def _extract_json(text: str):
 # 3. 書き出し
 # --------------------------------------------------------------------------
 def build_auto_config(apps: list[dict], classified: dict[str, dict]) -> dict:
-    """スキャン結果＋分類結果を config.auto.json の構造に組み立てる。"""
+    """スキャン結果＋分類結果を config.auto.json の構造に組み立てる。
+
+    Windows のスキャン結果は exe 名（起動中把握・終了・配置に使う）を持つので、有れば載せる。
+    """
     out_apps: dict[str, dict] = {}
     for a in apps:
         info = classified.get(a["name"], {"category": "その他", "aliases": []})
-        out_apps[a["name"]] = {
+        entry = {
             "target": a["target"],
             "kind": a["kind"],
             "path": a["path"],
             "category": info.get("category", "その他"),
             "aliases": info.get("aliases", []),
         }
+        if a.get("exe"):  # Windows のみ（Mac は open -a でアプリ名起動なので exe 不要）
+            entry["exe"] = a["exe"]
+        out_apps[a["name"]] = entry
     return {"apps": out_apps}
 
 
@@ -244,22 +320,19 @@ def write_auto_config(config: dict) -> None:
 # エントリポイント
 # --------------------------------------------------------------------------
 def main() -> None:
-    if IS_WINDOWS:
-        # TODO(win): Windows のアプリスキャンは未実装。
-        #   スタートメニューの .lnk（%APPDATA%\Microsoft\Windows\Start Menu\Programs）や
-        #   レジストリのアンインストール情報を走査して同等の一覧を作る想定。
-        print("Windows 版のアプリスキャンは未実装です（TODO）。")
-        print("現状このセットアップは Mac 専用です。手動で config.user.json を編集してください。")
-        return
-    if not IS_MAC:
-        print(f"未対応のOSです（{platform.system()}）。Mac でのみ動作します。")
+    if not (IS_MAC or IS_WINDOWS):
+        print(f"未対応のOSです（{platform.system()}）。Mac / Windows でのみ動作します。")
         return
 
     print("インストール済みアプリをスキャンしています...")
-    apps = scan_apps()
-    pwa_n = sum(1 for a in apps if a["kind"] == "pwa")
-    native_n = sum(1 for a in apps if a["kind"] == "native")
-    print(f"  スキャン完了：{len(apps)} 件（PWA {pwa_n} / native {native_n}）")
+    if IS_WINDOWS:
+        apps = scan_apps_windows()
+        print(f"  スキャン完了：{len(apps)} 件（スタートメニュー .lnk）")
+    else:
+        apps = scan_apps()
+        pwa_n = sum(1 for a in apps if a["kind"] == "pwa")
+        native_n = sum(1 for a in apps if a["kind"] == "native")
+        print(f"  スキャン完了：{len(apps)} 件（PWA {pwa_n} / native {native_n}）")
 
     if not apps:
         print("アプリが見つかりませんでした。終了します。")
