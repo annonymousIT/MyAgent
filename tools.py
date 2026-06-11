@@ -79,6 +79,11 @@ def load_config() -> dict:
     merged_apps = dict(auto.get("apps", {}))
     merged_apps.update(user.get("apps", {}))
 
+    # user の "hide" に挙げたアプリ名は候補から外す（スキャンが拾った不要アプリの抑制）。
+    # 例: 標準カレンダーを隠して「カレンダー」をGoogleカレンダーに一本化する。
+    for name in user.get("hide", []):
+        merged_apps.pop(name, None)
+
     return {
         "sites": user.get("sites", {}),
         "apps": merged_apps,
