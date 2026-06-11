@@ -57,26 +57,25 @@ def clean_for_speech(text: str) -> str:
     return t
 
 
-def _voicevox_speak(text: str) -> bool:
-    """VOICEVOX で合成して再生。成功したら True。エンジン未起動・失敗なら False（→フォールバック）。"""
+def _vv_synth(text: str) -> "bytes | None":
+    """1チャンクを VOICEVOX で合成して WAV を返す。失敗（エンジン未起動含む）は None。"""
     try:
-        # 1) テキスト → 音声合成用クエリ（接続拒否ならここで即例外＝待たない）
         q = urllib.parse.urlencode({"text": text, "speaker": VOICEVOX_SPEAKER})
         req = urllib.request.Request(f"{VOICEVOX_URL}/audio_query?{q}", method="POST")
         query = json.loads(urllib.request.urlopen(req, timeout=2).read())
-        query["pitchScale"] = VOICEVOX_PITCH  # トーンを下げる
-        query["speedScale"] = VOICEVOX_SPEED  # 話速をほんの少し遅く
-        # 2) クエリ → WAV
+        query["pitchScale"] = VOICEVOX_PITCH
+        query["speedScale"] = VOICEVOX_SPEED
         req2 = urllib.request.Request(
             f"{VOICEVOX_URL}/synthesis?speaker={VOICEVOX_SPEAKER}",
             data=json.dumps(query).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            headers={"Content-Type": "application/json"}, method="POST",
         )
-        wav = urllib.request.urlopen(req2, timeout=15).read()
+        return urllib.request.urlopen(req2, timeout=15).read()
     except Exception:
-        return False
-    # 3) 再生（一時WAV）
+        return None
+
+
+def _play_wav(wav: bytes) -> None:
     path = ""
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -85,19 +84,43 @@ def _voicevox_speak(text: str) -> bool:
         if IS_MAC:
             subprocess.run(["afplay", path], check=False)
         elif IS_WINDOWS:
-            ps = f"(New-Object Media.SoundPlayer '{path}').PlaySync()"
-            subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=False)
-        else:
-            return False
-        return True
-    except Exception:
-        return False
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                            f"(New-Object Media.SoundPlayer '{path}').PlaySync()"], check=False)
     finally:
         if path:
             try:
                 os.unlink(path)
             except OSError:
                 pass
+
+
+def _voicevox_speak(text: str) -> bool:
+    """VOICEVOX で読み上げ。文ごとにストリーミング（最初の一文を合成したら即再生し、
+    残りは裏で合成）→ 体感の出だしが速い。成功 True / エンジン未起動など False（→sayへ）。"""
+    parts = [p for p in re.split(r"(?<=[。！？!?])", text) if p.strip()]
+    if not parts:
+        parts = [text]
+    first = _vv_synth(parts[0])
+    if first is None:
+        return False  # エンジン未起動 → 呼び出し側で say フォールバック
+    import queue as _queue
+
+    q: "_queue.Queue" = _queue.Queue()
+
+    def _produce() -> None:
+        for p in parts[1:]:
+            q.put(_vv_synth(p))
+        q.put(None)
+
+    threading.Thread(target=_produce, daemon=True).start()  # 残りを裏で合成
+    _play_wav(first)                                        # 最初の一文を即再生
+    while True:
+        w = q.get()
+        if w is None:
+            break
+        if w:
+            _play_wav(w)
+    return True
 
 
 # say(Kyoko)が誤読しやすい語の読み補正（say経路のみ。VOICEVOXは自前辞書が優秀なので適用しない）。

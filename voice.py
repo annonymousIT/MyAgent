@@ -31,11 +31,11 @@ import speak as speak_mod
 SAMPLE_RATE = 16000
 FRAME_MS = 30
 FRAME = SAMPLE_RATE * FRAME_MS // 1000           # 480 samples/frame
-SILENCE_MS = int(os.environ.get("SILENCE_MS", "800"))
+SILENCE_MS = int(os.environ.get("SILENCE_MS", "600"))
 SILENCE_FRAMES = SILENCE_MS // FRAME_MS
 PAD_FRAMES = 10                                   # 発話開始判定の前後バッファ
 MIN_SPEECH_FRAMES = 8                             # これ未満は雑音として無視
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")  # baseは小型で約4倍速・短い命令なら十分
 
 EXIT_WORDS = ("終了", "バイバイ", "ばいばい", "おやすみ")  # おやすみは挨拶もあるが終了も兼ねる運用
 RESET_WORDS = ("リセット", "忘れて", "履歴クリア")
