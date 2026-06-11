@@ -211,31 +211,80 @@ def launch_app(name: str) -> str:
         return f"{name} の起動に失敗しました：{e}"
 
 
+# 日本語の言い回し → 正規アクション。OSに依存しない名前で受け、実体はOSネイティブで実行する
+# （config.user.json の system 表は Mac の osascript 文字列なので Windows では使えない＝この層で吸収）。
+_SYSTEM_ALIASES = {
+    "音量下げる": "volume_down", "音量下げて": "volume_down", "ボリューム下げて": "volume_down", "小さく": "volume_down",
+    "音量上げる": "volume_up", "音量上げて": "volume_up", "ボリューム上げて": "volume_up", "大きく": "volume_up",
+    "ミュート": "mute", "消音": "mute", "ミュート解除": "unmute", "消音解除": "unmute",
+    "モニタ消す": "monitor_off", "画面消す": "monitor_off", "モニタオフ": "monitor_off", "画面オフ": "monitor_off",
+    "寝る": "sleep", "スリープ": "sleep", "スリープして": "sleep",
+    "再起動": "restart", "再起動して": "restart",
+    "シャットダウン": "shutdown", "電源切る": "shutdown", "電源を切る": "shutdown",
+}
+_DANGEROUS_ACTIONS = {"sleep", "restart", "shutdown"}
+
+
+def _run_system_native(action: str) -> "str | None":
+    """正規アクションをOSネイティブで実行。成功/失敗メッセージを返す。未対応なら None。"""
+    if IS_WINDOWS:
+        import win_ops
+        try:
+            return "実行しました。" if win_ops.system_action(action) else None
+        except Exception as e:
+            return f"失敗しました（{type(e).__name__}）。"
+    if IS_MAC:
+        mac = {
+            "volume_down": "osascript -e 'set volume output volume ((output volume of (get volume settings)) - 12)'",
+            "volume_up": "osascript -e 'set volume output volume ((output volume of (get volume settings)) + 12)'",
+            "mute": "osascript -e 'set volume output muted true'",
+            "unmute": "osascript -e 'set volume output muted false'",
+            "monitor_off": "pmset displaysleepnow",
+            "sleep": "osascript -e 'tell application \"System Events\" to sleep'",
+            "restart": "osascript -e 'tell application \"System Events\" to restart'",
+            "shutdown": "osascript -e 'tell application \"System Events\" to shut down'",
+        }
+        if action in mac:
+            subprocess.run(mac[action], shell=True, check=False)
+            return "実行しました。"
+    return None
+
+
 def run_system(name: str) -> str:
-    """名前→システムコマンド表を実行。危険コマンドは別表に隔離し、実行前に確認を挟む。"""
+    """システム操作（音量・モニタ・スリープ等）を実行する。
+
+    日本語の言い回しを正規アクションに寄せ、OSネイティブで実行（nircmd/osascript 非依存）。
+    危険操作（スリープ・再起動・シャットダウン）は実行前に確認を挟む（非対話環境では実行しない）。
+    既定の語彙に無い名前は、後方互換で config の system / dangerous_system 文字列を試す。
+    """
+    action = _SYSTEM_ALIASES.get(name.strip()) if name else None
+
+    if action:
+        if action in _DANGEROUS_ACTIONS:
+            if not sys.stdin or not sys.stdin.isatty():
+                return f"『{name}』は危険な操作です。安全のため、この画面からは実行しません（ターミナルから操作してください）。"
+            if input(f"⚠ 『{name}』を実行しますか？ [y/N] ").strip().lower() != "y":
+                return f"{name} は中止しました。"
+        msg = _run_system_native(action)
+        if msg is not None:
+            return f"{name} を{msg}"
+
+    # 後方互換：既定語彙に無い独自コマンドは config の文字列を実行（Mac等）
     config = load_config()
     safe = config.get("system", {})
     dangerous = config.get("dangerous_system", {})
-
-    if name in safe:
-        try:
-            subprocess.run(safe[name], shell=True, check=False)
-            return f"{name} を実行しました。"
-        except Exception as e:
-            return f"{name} の実行に失敗しました：{e}"
-
-    if name in dangerous:
-        # 危険操作は即実行せず確認を挟む（自律性の制限：暴走防止）
-        # Web UI 等の非対話環境では input() がサーバを固めるため、実行せず確認を促す
+    if name in safe and not IS_WINDOWS:  # Windowsでは Mac用osascript文字列は使わない
+        subprocess.run(safe[name], shell=True, check=False)
+        return f"{name} を実行しました。"
+    if name in dangerous and not IS_WINDOWS:
         if not sys.stdin or not sys.stdin.isatty():
-            return f"『{name}』は危険な操作です。安全のため、この画面からは実行しません（ターミナルから操作してください）。"
-        ans = input(f"⚠ 『{name}』は危険な操作です。実行しますか？ [y/N] ").strip().lower()
-        if ans == "y":
+            return f"『{name}』は危険な操作です。この画面からは実行しません。"
+        if input(f"⚠ 『{name}』を実行しますか？ [y/N] ").strip().lower() == "y":
             subprocess.run(dangerous[name], shell=True, check=False)
             return f"{name} を実行しました。"
         return f"{name} は中止しました。"
 
-    return f"『{name}』に対応するシステムコマンドが {CONFIG_HINT} にありません。"
+    return f"『{name}』に対応するシステム操作が見つかりませんでした。"
 
 
 # このプロセスで ephemeral（一時的）に開いたURLの記録（Step5(b) / ADR-0021）。

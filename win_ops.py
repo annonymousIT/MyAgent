@@ -271,3 +271,33 @@ def monitor_count() -> int:
         return len(_monitors())
     except Exception:
         return 1
+
+
+# --------------------------------------------------------------------------
+# システム操作（音量・モニタ・スリープ等）— nircmd 不要のネイティブ実装
+# --------------------------------------------------------------------------
+_VK = {"volume_down": 0xAE, "volume_up": 0xAF, "mute": 0xAD, "unmute": 0xAD}
+_VOL_STEPS = 5  # 1回の「音量下げる/上げる」で送るキー回数（1回≈2%）
+
+
+def system_action(action: str) -> bool:
+    """正規化済みアクションを実行。対応してなければ False（呼び出し側がconfig文字列へフォールバック）。"""
+    if action in _VK:
+        vk = _VK[action]
+        times = _VOL_STEPS if action in ("volume_down", "volume_up") else 1
+        for _ in range(times):
+            user32.keybd_event(vk, 0, 0, 0)   # down
+            user32.keybd_event(vk, 0, 2, 0)   # up (KEYEVENTF_KEYUP)
+        return True
+    if action == "monitor_off":
+        # 画面を省電力オフ（HWND_BROADCAST に WM_SYSCOMMAND/SC_MONITORPOWER, 2=オフ）
+        user32.SendMessageW(0xFFFF, 0x0112, 0xF170, 2)
+        return True
+    if action == "sleep":
+        ctypes.windll.powrprof.SetSuspendState(0, 1, 0)
+        return True
+    if action in ("restart", "shutdown"):
+        flag = "/r" if action == "restart" else "/s"
+        subprocess.run(["shutdown", flag, "/t", "60"], check=False)
+        return True
+    return False

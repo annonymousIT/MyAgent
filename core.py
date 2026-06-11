@@ -302,15 +302,23 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     # ストリーミング発声（#34）。最終応答を文単位で on_sentence へ流す。
     streamed = {"text": "", "first_done": False}  # 発声済み本文＋最初のチャンクを出したか
     _SENT_END = re.compile(r"[。！？!?\n]")
-    # 最初のチャンクだけは読点「、」でも切って即発声する（「おはようございます、」で合成を開始
-    # ＝句点まで待つより数百ms〜1秒早く声が出る）。2チャンク目以降は句点区切りで自然に。
     _FIRST_END = re.compile(r"[。！？!?\n、,]")
+    _MIN_FIRST = 8  # 最初のチャンクを読点で切る最小長（短すぎる「あ、」等を1人で喋らせない）
+
+    def _break(text: str):
+        """次の発声区切り位置の match を返す。最初のチャンクだけは『十分な長さの読点』でも切る
+        （「おはようございます、」で即合成＝声出しが早い／「あ、」のような短断片は句点まで待つ）。"""
+        if streamed["first_done"]:
+            return _SENT_END.search(text)
+        m = _FIRST_END.search(text)
+        if m and text[m.start()] in "、," and len(text[:m.end()].strip()) < _MIN_FIRST:
+            return _SENT_END.search(text)  # 読点だが短い → 句点まで待つ
+        return m
 
     def _emit(buf: dict) -> None:
-        """バッファから完成した文を取り出して on_sentence に渡す（初回は読点でも切る）。"""
+        """バッファから完成した文を取り出して on_sentence に渡す。"""
         while True:
-            pat = _SENT_END if streamed["first_done"] else _FIRST_END
-            m = pat.search(buf["t"])
+            m = _break(buf["t"])
             if not m:
                 break
             i = m.end()
