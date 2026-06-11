@@ -11,9 +11,13 @@
 - 前ターンで開いた一時タブ（web_search等）は次の発話の頭で自動クローズ→元のアプリへ画面を戻す。
 - 返答は短く（personaにVoice mode指示を追加注入）→ TTSも速い。
 
+起動方式（ADR-0038・仮）: ウェイクワード「やっほーエージェント」を含む発話だけ反応する。
+  ゲーム中・通話中・独り言は無視＝誤爆しない。一度起動したら AWAKE_WINDOW 秒は呼びかけ不要。
+
 起動: source .env && source .venv/bin/activate && python voice.py
-終了: 「終了」「バイバイ」（その一言だけ言う）or Ctrl+C
-環境変数: WHISPER_MODEL(既定 base), VAD_AGGRESSIVENESS(0-3,既定2), SILENCE_MS(既定600)
+終了: 「終了」「バイバイ」（起動中にその一言だけ言う）or Ctrl+C
+環境変数: WHISPER_MODEL(既定 base), VAD_AGGRESSIVENESS(0-3,既定2), SILENCE_MS(既定600),
+          WAKE_PHRASE(既定 やっほーエージェント), AWAKE_WINDOW_SEC(既定 20)
 """
 
 from __future__ import annotations
@@ -21,8 +25,11 @@ from __future__ import annotations
 import collections
 import os
 import random
+import re
 import sys
 import threading
+import time
+import unicodedata
 
 import numpy as np
 import sounddevice as sd
@@ -50,6 +57,28 @@ _HALLUCINATIONS = ("ご視聴ありがとうございました", "ありがと�
 # LLM待ちを埋める相槌（起動時にVOICEVOXで合成してメモリに保持→即再生できる）
 FILLER_TEXTS = ("はい。", "ええと。", "ちょっと待ってくださいね。")
 FILLER_AFTER = 0.9  # 秒。これより早くLLMが返れば相槌なし
+
+# ウェイクワード（ADR-0038・仮）。これを含む発話だけ反応する＝ゲーム中・通話中の声は無視＝誤爆しない。
+# 一度起動したら AWAKE_WINDOW 秒は呼びかけ不要で連続会話できる。
+WAKE_PHRASE = os.environ.get("WAKE_PHRASE", "やっほーエージェント")
+AWAKE_WINDOW = float(os.environ.get("AWAKE_WINDOW_SEC", "20"))
+# Whisperの表記ゆれ（やっほー/ヤッホー/やっほ 等）を緩く拾う。「やっほ*＋エージェント」を起動とみなす。
+_WAKE_RE = re.compile(r"(やっほ[ーぉお]?|ヤッホ[ーォ]?|ﾔｯﾎ[ｰ]?)\s*エージェント")
+
+
+def _norm(s: str) -> str:
+    """全角半角・空白を均して比較しやすくする。"""
+    return unicodedata.normalize("NFKC", s).replace(" ", "").replace("　", "").strip("。、！!？?　 ")
+
+
+def _find_wake(text: str) -> "str | None":
+    """発話からウェイクワードを探す。見つかれば『それ以降のコマンド文字列』を返す
+    （呼びかけのみなら ""）。無ければ None（＝無視する）。"""
+    n = _norm(text)
+    m = _WAKE_RE.search(n)
+    if not m:
+        return None
+    return n[m.end():].lstrip("、,。.！!？? 　")
 
 # 返答を声で届ける前提の追加指示（personaに連結＝音声セッション専用の安定プレフィックス）
 VOICE_HINT = ("\n[Voice mode] The reply is spoken aloud by TTS. Keep it to 1-2 short sentences. "
@@ -122,9 +151,11 @@ def main() -> None:
     history: list = []
     pending_eph: list = []   # 前ターンで開いた一時タブ（次の発話の頭で閉じる）
     pending_front = ""       # 一時タブを開く前に前面だったアプリ（閉じた後ここへ戻す）
+    awake_until = 0.0        # この時刻まではウェイクワード無しで連続会話できる
 
-    print("🎤 音声入力モード。話しかけてください（「終了」だけ言うと停止 / Ctrl+C でも可）", flush=True)
-    speak_mod.speak("音声モード、どうぞ。", block=True)
+    print(f"🎤 音声入力モード。「{WAKE_PHRASE}」と呼びかけてから話してください"
+          f"（起動後{int(AWAKE_WINDOW)}秒は呼びかけ不要 / 「終了」で停止 / Ctrl+C でも可）", flush=True)
+    speak_mod.speak(f"音声モードです。{WAKE_PHRASE}、と呼んでくださいね。", block=True)
 
     while True:
         try:
@@ -134,6 +165,22 @@ def main() -> None:
                 continue
             text = _transcribe(model, audio)
             if not text or _is_noise(text):
+                continue
+
+            # ウェイクワードのゲート（ADR-0038）。起動中ウィンドウ外で、ウェイクワードを含まない
+            # 発話（ゲーム中の声・通話・独り言）は完全に無視する＝誤爆しない。
+            now = time.time()
+            wake_cmd = _find_wake(text)
+            if wake_cmd is not None:               # 「やっほーエージェント」検出
+                awake_until = now + AWAKE_WINDOW
+                if not wake_cmd:                   # 呼びかけのみ → 返事して次の発話を待つ
+                    print(f"\nあなた: {text}  〔起動〕", flush=True)
+                    speak_mod.speak("はい、マスター？", block=True)
+                    continue
+                text = wake_cmd                    # ウェイク以降をコマンドとして実行
+            elif now < awake_until:                # 起動中ウィンドウ → 呼びかけ不要で連続会話
+                text = _norm(text)
+            else:                                  # 待機中 → 無視（誤爆防止の核）
                 continue
             print(f"\nあなた: {text}", flush=True)
 
@@ -182,6 +229,7 @@ def main() -> None:
             if u:
                 print(f"  (¥{u.get('yen', 0)} / {u.get('calls', 0)}コール)", flush=True)
             speak_mod.speak(reply, block=True)  # 読み上げ中はマイクを開かない＝自分の声で誤起動しない
+            awake_until = time.time() + AWAKE_WINDOW  # 対話のたびに起動ウィンドウを延長
 
             eph = result.get("ephemeral") or []
             if eph:  # このターンで開いた一時タブは次の発話の頭で閉じて画面を戻す
