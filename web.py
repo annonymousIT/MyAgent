@@ -138,6 +138,7 @@ input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing)send()})
 class Handler(BaseHTTPRequestHandler):
     client = None
     persona = ""
+    history = []  # 会話履歴（Step5(a)）。単一ユーザー前提でプロセス内に保持
 
     def log_message(self, *args):  # アクセスログを黙らせる
         pass
@@ -168,7 +169,13 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 self._send(200, json.dumps({"actions": [], "reply": "（何か入力してください）"}), "application/json")
                 return
-            result = core.run_turn(self.client, self.persona, text, dry_run=dry)
+            # 会話のリセット（記憶を消す）
+            if text in ("リセット", "履歴クリア", "忘れて", "リセットして"):
+                Handler.history = []
+                self._send(200, json.dumps({"actions": [], "reply": "会話の記憶をリセットしました。"}, ensure_ascii=False), "application/json; charset=utf-8")
+                return
+            result = core.run_turn(self.client, self.persona, text, dry_run=dry, history=Handler.history)
+            Handler.history = result.pop("history", Handler.history)  # 次ターンへ持ち越し（clientには返さない）
             self._send(200, json.dumps(result, ensure_ascii=False), "application/json; charset=utf-8")
         except Exception as e:
             self._send(200, json.dumps({"error": f"{type(e).__name__}: {e}"}, ensure_ascii=False), "application/json; charset=utf-8")

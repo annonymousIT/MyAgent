@@ -89,22 +89,38 @@ def build_system_prompt(persona: str) -> str:
     return persona + "\n\n" + available_operations()
 
 
-def run_turn(client, persona: str, user_input: str, dry_run: bool = False) -> dict:
-    """1ターン処理。{"actions": [...], "reply": "..."} を返す。
+MAX_HISTORY_MESSAGES = 10  # 直近5往復ぶんを保持（ADR-3：直近Nそのまま。古いものの要約は将来）
+
+
+def run_turn(client, persona: str, user_input: str, dry_run: bool = False, history=None) -> dict:
+    """1ターン処理。{"actions": [...], "reply": "...", "history": [...]} を返す（Step5(a) 会話記憶）。
+
+    history（直近の会話、user/assistantのテキストのみ）を前置きしてモデルに渡すことで、
+    「それで行こう」「さっきの」などターンまたぎの参照が通る。返り値の history を呼び出し側が
+    次ターンに渡す。履歴はテキストのみ保持し、tool_use/tool_result ブロックは持ち越さない
+    （ブロックのペア不整合による API エラーを避けるため）。
 
     dry_run=True なら open_site / launch_app / run_system を実際には実行せず、
     どのツールが選ばれたかと返答だけを返す（公共の場での確認用）。
     """
     actions = []
+    history = list(history or [])
     system_prompt = build_system_prompt(persona)  # 人格 ＋ ②材料（利用可能な操作一覧）
-    messages = [{"role": "user", "content": user_input}]
+    messages = history + [{"role": "user", "content": user_input}]
+
+    def _finish(reply: str) -> dict:
+        new_history = (history + [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": reply},
+        ])[-MAX_HISTORY_MESSAGES:]
+        return {"actions": actions, "reply": reply, "history": new_history}
 
     response = client.messages.create(
         model=MODEL, max_tokens=300, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
     )
 
     if response.stop_reason != "tool_use":
-        return {"actions": actions, "reply": _text_of(response)}
+        return _finish(_text_of(response))
 
     messages.append({"role": "assistant", "content": response.content})
     tool_results = []
@@ -124,10 +140,10 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False) -> di
     # stop_reason が tool_use でも実 tool_use ブロックが無い稀ケース。空contentで
     # フォロー呼び出しすると API 400 になるため、最初の応答テキストで返す。
     if not tool_results:
-        return {"actions": actions, "reply": _text_of(response)}
+        return _finish(_text_of(response))
     messages.append({"role": "user", "content": tool_results})
 
     final = client.messages.create(
         model=MODEL, max_tokens=300, system=system_prompt, tools=tools.TOOL_DEFS, messages=messages
     )
-    return {"actions": actions, "reply": _text_of(final)}
+    return _finish(_text_of(final))
