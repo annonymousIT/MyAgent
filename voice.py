@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import unicodedata
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -39,6 +40,16 @@ import webrtcvad
 import core
 import speak as speak_mod
 import tools
+
+_STATE_PATH = Path(__file__).parent / "orb_state.txt"
+
+
+def _set_state(s: str) -> None:
+    """orb に今の状態（recording/thinking/speaking/idle）を伝える（orb が読んで見た目に反映）。"""
+    try:
+        _STATE_PATH.write_text(s, encoding="utf-8")
+    except Exception:
+        pass
 
 SAMPLE_RATE = 16000
 FRAME_MS = 30
@@ -142,6 +153,7 @@ def _record_while_held(mic: "sd.InputStream", vk: int) -> "np.ndarray | None":
     while not (u.GetAsyncKeyState(vk) & PRESSED):   # 押されるまで待つ
         time.sleep(0.03)
     print("🎤 録音中（離すと送信）…", end="\r", flush=True)
+    _set_state("recording")
     _flush_mic_global(mic)                          # 押した瞬間より前の音は捨てる
     frames: "list[np.ndarray]" = []
     while u.GetAsyncKeyState(vk) & PRESSED:         # 押している間だけ録る
@@ -204,8 +216,11 @@ def _denoise(audio_f32: "np.ndarray") -> "np.ndarray":
 
 def _transcribe(model, audio_i16: "np.ndarray", hint: str = "") -> str:
     audio = _denoise(audio_i16.astype(np.float32) / 32768.0)
-    # beam_size=5 で精度優先、initial_prompt で語彙を寄せる（短い命令の取り違えを減らす）。
-    segs, _ = model.transcribe(audio, language="ja", beam_size=5, initial_prompt=hint or None)
+    # beam_size=5: 精度優先 / initial_prompt: 語彙を寄せる（短い命令の取り違えを減らす）
+    # vad_filter: 無音・非音声区間を内部でカット（幻聴と処理時間を減らす）
+    # condition_on_previous_text=False: 前文に引きずられた幻聴の連鎖を防ぐ（コマンド用途では文脈不要）
+    segs, _ = model.transcribe(audio, language="ja", beam_size=5, initial_prompt=hint or None,
+                               vad_filter=True, condition_on_previous_text=False)
     return "".join(s.text for s in segs).strip()
 
 
@@ -350,6 +365,7 @@ def main() -> None:
                     print("   （待機中：ウェイクワード『エージェント』が無いので無視）", flush=True)
                     continue
             print(f"\nあなた: {text}", flush=True)
+            _set_state("thinking")
 
             stripped = text.strip("。、！!？? 　")
             if stripped in EXIT_WORDS:
@@ -418,6 +434,7 @@ def main() -> None:
                     first = False
                 slot["ev"].wait()          # このチャンクの合成完了を待つ（裏で次も合成中）
                 if slot["wav"]:
+                    _set_state("speaking")
                     speak_mod._play_wav(slot["wav"])
                     spoke_any = True
                 elif slot["text"]:         # 合成失敗（エンジン落ち等）→ OS音声でフォールバック
@@ -442,6 +459,7 @@ def main() -> None:
                 awake_until = time.time() + AWAKE_WINDOW
             else:
                 awake_until = 0.0
+            _set_state("idle")
 
             eph = result.get("ephemeral") or []
             if eph:  # このターンで開いた一時タブは次の発話の頭で閉じて画面を戻す
@@ -450,6 +468,7 @@ def main() -> None:
             print("\n終了します。", flush=True)
             break
         except Exception as e:  # noqa: BLE001
+            _set_state("idle")
             print(f"⚠ {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             continue
 

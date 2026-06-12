@@ -100,18 +100,28 @@ class Orb:
         self._ripples: list[float] = []   # 各波紋の現在半径
         self._tick = 0
         self._settings_win = None
+        self._mini_win = None
+        self._chat_proc = None
         self.listening = False            # 聴取（voice.py 子プロセス）が動いているか
+        self.voice_state = "idle"         # voice.py が orb_state.txt に書く状態（recording/thinking/speaking）
         self.voice_proc = None
+        self._hidden_fs = False           # フルスクリーンアプリ検知で隠れている間 True
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         threading.Thread(target=_ensure_voicevox, daemon=True).start()  # VOICEVOX を裏で起動
-        self._poll_voice()                # 子プロセスが落ちたら聴取OFF表示に戻す監視
+        self._poll_voice()                # 子プロセス監視＋状態ファイル読み
+        self._poll_fullscreen()           # 全画面アプリの間は自動で隠れる（ゲーム/動画の邪魔をしない）
         self._animate()
 
     # ---- アニメーション（中心は静止、周囲が水の波紋のように広がる）----
     def _animate(self) -> None:
         th = self.theme
         self._tick += 1
-        every = max(10, RIPPLE_EVERY // 2) if self.listening else RIPPLE_EVERY  # 聴取中は波紋を速く
+        # 波紋の間隔＝状態表示：待機=静か / 聴取中=速い / 考え中・発話中=最速（生きて動いてる感）
+        every = RIPPLE_EVERY
+        if self.voice_state in ("thinking", "speaking"):
+            every = max(7, RIPPLE_EVERY // 4)
+        elif self.listening:
+            every = max(10, RIPPLE_EVERY // 2)
         if self._tick % every == 0:                  # 定期的に波紋を落とす
             self._ripples.append(float(CORE_R))
 
@@ -138,17 +148,14 @@ class Orb:
             c.create_oval(CENTER - rr, CENTER - rr, CENTER + rr, CENTER + rr,
                           fill=_lerp(th["body"], CHROMA_RGB, t), outline="")
 
-        # 中心の球：固定。中心ほど明るい同心円で“淡く光る球”に（反射＝オフセットの白点ではない）。
-        # 聴取中は芯を明るく（待機=落ち着き／聴取=起きてる、が一目で分かる）。
-        body = _lerp(th["body"], th["bright"], 0.35) if self.listening else _hex(th["body"])
+        # 中心の球：単色フラット（同心円のグラデは“目玉”に見えるためユーザー却下・2026-06-12）。
+        # 状態は「単色の明るさ」だけで表現：待機=落ち着いた色 / 聴取=明るい / 考え中・発話中=さらに明るい。
+        t_bright = {"idle": 0.0, "recording": 0.35, "thinking": 0.5, "speaking": 0.5}.get(self.voice_state, 0.0)
+        if self.listening and t_bright == 0.0:
+            t_bright = 0.35
+        body = _lerp(th["body"], th["bright"], t_bright)
         c.create_oval(CENTER - CORE_R, CENTER - CORE_R, CENTER + CORE_R, CENTER + CORE_R,
                       fill=body, outline="")
-        r2 = CORE_R * 0.62
-        c.create_oval(CENTER - r2, CENTER - r2, CENTER + r2, CENTER + r2,
-                      fill=_lerp(th["body"], th["bright"], 0.55), outline="")
-        r3 = CORE_R * 0.30
-        c.create_oval(CENTER - r3, CENTER - r3, CENTER + r3, CENTER + r3,
-                      fill=_hex(th["bright"]), outline="")
 
         self.root.after(40, self._animate)
 
@@ -174,10 +181,81 @@ class Orb:
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label=("聴取を停止" if self.listening else "聴取を開始"),
                          command=self._toggle_listening)
+        menu.add_command(label="ミニ入力（テキストで話す）", command=self._open_mini)
+        menu.add_command(label="チャット画面を開く", command=self._open_chat)
         menu.add_command(label="設定", command=self._open_settings)
         menu.add_separator()
         menu.add_command(label="終了", command=self._quit)
         menu.tk_popup(e.x_root, e.y_root)
+
+    # ---- テキスト入力（⑤）----
+    def _open_chat(self) -> None:
+        """ブラウザのチャットUI（web.py）を起動して開く。既に起動中なら開くだけ。"""
+        if not (self._chat_proc and self._chat_proc.poll() is None):
+            py = sys.executable.replace("pythonw.exe", "python.exe")
+            env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+            flags = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
+            try:
+                self._chat_proc = subprocess.Popen([py, str(BASE / "web.py")], cwd=str(BASE),
+                                                   env=env, creationflags=flags)
+            except Exception as ex:  # noqa: BLE001
+                self._toast(f"チャットUIの起動失敗: {ex}")
+                return
+        import webbrowser
+        self.root.after(1200, lambda: webbrowser.open("http://localhost:8765"))
+
+    def _open_mini(self) -> None:
+        """orb のそばに小さな入力欄。Enter で送信→返事を表示＋（設定がONなら）読み上げ。"""
+        if self._mini_win and tk.Toplevel.winfo_exists(self._mini_win):
+            self._mini_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        self._mini_win = win
+        win.title("MyAgent ミニ入力")
+        win.wm_attributes("-topmost", True)
+        win.geometry(f"+{max(0, self.root.winfo_x() - 220)}+{self.root.winfo_y() + 40}")
+        win.config(padx=10, pady=8)
+        entry = ttk.Entry(win, width=42)
+        entry.grid(row=0, column=0, sticky="ew")
+        out = tk.Text(win, width=46, height=5, wrap="char", state="disabled",
+                      relief="flat", background="#f3f3f3")
+        out.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        win.columnconfigure(0, weight=1)
+        entry.focus_set()
+
+        def _show(text: str) -> None:
+            out.config(state="normal")
+            out.delete("1.0", "end")
+            out.insert("1.0", text)
+            out.config(state="disabled")
+
+        def _send(_e=None) -> None:
+            msg = entry.get().strip()
+            if not msg:
+                return
+            entry.delete(0, "end")
+            _show("…考え中…")
+
+            def _work() -> None:
+                try:
+                    import core
+                    if not hasattr(self, "_client"):
+                        self._client = core.build_client()
+                        self._persona = core.load_persona()
+                        self._text_history: list = []
+                    r = core.run_turn(self._client, self._persona, msg, history=self._text_history)
+                    self._text_history = r.get("history", self._text_history)
+                    reply = r.get("reply", "（無応答）")
+                    c = r.get("cost") or {}
+                    tail = f"\n―― ¥{c.get('turn', '?')}（今月 ¥{c.get('month', '?')}/{c.get('budget', 300)}）"
+                    self.root.after(0, lambda: _show(reply + tail))
+                    _safe_speak(reply)
+                except Exception as ex:  # noqa: BLE001
+                    self.root.after(0, lambda: _show(f"⚠ {type(ex).__name__}: {ex}"))
+
+            threading.Thread(target=_work, daemon=True).start()
+
+        entry.bind("<Return>", _send)
 
     # ---- 聴取（voice.py 子プロセス）の起動/停止 ----
     def _toggle_listening(self) -> None:
@@ -217,11 +295,31 @@ class Orb:
         self.listening = False
 
     def _poll_voice(self) -> None:
-        """子プロセスが自分で終了（「終了」と言われた等）したら、聴取OFF表示へ戻す。"""
+        """子プロセス監視＋状態ファイル（orb_state.txt）読み。orb の見た目を voice.py の状態と同期する。"""
         if self.listening and (not self.voice_proc or self.voice_proc.poll() is not None):
             self.listening = False
             self.voice_proc = None
-        self.root.after(700, self._poll_voice)
+        try:
+            st = (BASE / "orb_state.txt").read_text(encoding="utf-8").strip()
+            self.voice_state = st if (self.listening and st) else "idle"
+        except Exception:
+            self.voice_state = "idle"
+        self.root.after(400, self._poll_voice)
+
+    def _poll_fullscreen(self) -> None:
+        """前面アプリが全画面（ゲーム/動画）の間は orb を隠し、戻ったら再表示する（⑥）。"""
+        try:
+            import win_ops
+            fs = IS_WINDOWS and win_ops.foreground_is_fullscreen()
+        except Exception:
+            fs = False
+        if fs and not self._hidden_fs:
+            self._hidden_fs = True
+            self.root.withdraw()
+        elif not fs and self._hidden_fs:
+            self._hidden_fs = False
+            self.root.deiconify()
+        self.root.after(900, self._poll_fullscreen)
 
     def _toast(self, msg: str) -> None:
         try:
@@ -232,6 +330,11 @@ class Orb:
 
     def _quit(self) -> None:
         self._stop_voice()
+        if self._chat_proc and self._chat_proc.poll() is None:
+            try:
+                self._chat_proc.terminate()
+            except Exception:
+                pass
         self.root.destroy()
 
     # ---- 設定画面 ----

@@ -317,6 +317,79 @@ def monitor_count() -> int:
         return 1
 
 
+_MONITOR_DEFAULTTONEAREST = 2
+_SHELL_CLASSES = {"Progman", "WorkerW"}  # デスクトップ自身（常に画面いっぱい）は全画面扱いしない
+
+# ウィンドウ一覧で無視するタイトル（システムUI・自分自身）
+_WIN_TITLE_IGNORE = ("Program Manager", "Windows 入力エクスペリエンス", "NVIDIA GeForce Overlay",
+                     "PowerToys", "tk", "MyAgent", "Windows PowerShell", "コマンド プロンプト")
+
+
+def windows_overview(max_n: int = 12, title_len: int = 20) -> "list[tuple[int, str]]":
+    """可視ウィンドウを (モニタ番号(左から1始まり), 短縮タイトル) で返す（⑦ ウィンドウ配置の把握）。
+
+    LLM に「どの画面に何が開いているか」を渡し、『整理して』『右のやつ左へ』等の柔軟な指示を
+    可能にするための材料。トークン節約のためタイトルは短縮し件数も絞る。
+    """
+    mons = _monitors()
+    xs = [m[0] for m in mons]
+
+    out: "list[tuple[int, str]]" = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _cb(hwnd, _lparam):
+        if len(out) >= max_n or not user32.IsWindowVisible(hwnd):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        title = buf.value
+        if any(ig in title for ig in _WIN_TITLE_IGNORE):
+            return True
+        hmon = user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+        mi = _MONITORINFO()
+        mi.cbSize = ctypes.sizeof(_MONITORINFO)
+        idx = 1
+        if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)) and xs:
+            try:
+                idx = xs.index(mi.rcWork.left) + 1
+            except ValueError:
+                idx = 1
+        t = title if len(title) <= title_len else title[:title_len] + "…"
+        out.append((idx, t))
+        return True
+
+    user32.EnumWindows(_cb, 0)
+    return out
+
+
+def foreground_is_fullscreen() -> bool:
+    """前面ウィンドウが、その載っているモニタを完全に覆っている（=全画面ゲーム/動画）か。
+
+    orb がゲームの上に浮いて邪魔をしないための判定。タスクバーを含むモニタ全域（rcMonitor）
+    との一致で見るので、通常の「最大化」（作業領域まで）は全画面とみなさない。
+    """
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return False
+    cls = ctypes.create_unicode_buffer(64)
+    user32.GetClassNameW(hwnd, cls, 64)
+    if cls.value in _SHELL_CLASSES:
+        return False
+    r = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return False
+    hmon = user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+    mi = _MONITORINFO()
+    mi.cbSize = ctypes.sizeof(_MONITORINFO)
+    if not user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+        return False
+    m = mi.rcMonitor
+    return r.left <= m.left and r.top <= m.top and r.right >= m.right and r.bottom >= m.bottom
+
+
 # --------------------------------------------------------------------------
 # システム操作（音量・モニタ・スリープ等）— nircmd 不要のネイティブ実装
 # --------------------------------------------------------------------------

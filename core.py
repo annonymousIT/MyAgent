@@ -109,6 +109,10 @@ def static_menu() -> str:
         "'monitor' (left/right/number); 半分や左右寄せ such as 左半分 set 'action'. '左の画面にDiscord' = "
         "manage_window(action=maximize, app=Discord, monitor=left). '右画面の左半分にChrome' = "
         "manage_window(action=left, app=Chrome, monitor=right). With one monitor, ignore monitor.\n"
+        "- Context data each turn: [Monitors]=screen count (1 → ignore monitor arg). [Running apps]=open now; "
+        "not listed = closed, but Chrome PWAs don't appear — if unsure just launch_app (idempotent, only brings "
+        "to front). [Windows now]=which window sits on which screen (mon1=left..) — use it for 整理して/並べ直して "
+        "requests: decide a sensible layout yourself and place each window with manage_window.\n"
         "- Remember/schedule/forget per the hard rules above.\n"
         "- Pure greetings/small talk (おはよ etc.): no tools; reply in character, weaving in a caring note from "
         "memory or upcoming schedule when natural.\n"
@@ -144,16 +148,15 @@ def static_menu() -> str:
 
 
 def volatile_context() -> str:
-    """Per-turn changing part (not cached): current time/profile/schedule + running apps."""
+    """Per-turn changing part (not cached). データだけを置き、説明文は static_menu（キャッシュ側）に置く
+    （毎ターン非キャッシュで課金されるのはここだけなので、変わらない文章を混ぜない＝コスト最適化）。"""
     running = "、".join(tools.running_apps()) or "(none)"
     n_mon = tools.monitor_count()
+    win_line = tools.windows_summary() if n_mon else ""
     return (
-        profile_store.context_text() + "\n"
-        f"[Monitors]: {n_mon}（{'複数画面あり。左/右の画面指定が有効' if n_mon > 1 else '単一画面。monitor指定は無視'}）\n"
-        f"[Running apps now]: {running}\n"
-        "These are the apps open right now — judge from this. Not listed = closed. "
-        "Chrome PWAs (YouTube/Gmail/moodle) don't appear here, so if unsure just launch_app "
-        "(harmless — only brings to front if already open)."
+        profile_store.context_text()
+        + f"\n[Monitors]: {n_mon}\n[Running apps]: {running}"
+        + (f"\n[Windows now]: {win_line}" if win_line else "")
     )
 
 

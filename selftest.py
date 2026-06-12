@@ -166,6 +166,22 @@ ok(isinstance(run, list), "running_apps がリスト返す")
 ok(win_ops.app_is_running("explorer.exe"), "app_is_running(explorer)=True")
 ok(not win_ops.app_is_running("絶対にない.exe"), "app_is_running(存在しない)=False")
 
+# ---------------------------------------------------------------- 新機能（⑦窓把握 / ⑥全画面 / ④CDP / 状態連携）
+section("窓把握・全画面・CDP・状態")
+ws = tools.windows_summary()
+ok(isinstance(ws, str), "windows_summary が文字列")
+ok(ws == "" or "mon" in ws, "windows_summary 形式（mon◯:）")
+ok(isinstance(win_ops.foreground_is_fullscreen(), bool), "foreground_is_fullscreen が bool")
+import cdp
+ok(isinstance(cdp.available(), bool), "cdp.available（未起動でも安全に bool）")
+ok(cdp.close_by_url([]) == 0, "cdp.close_by_url 空リスト＝0")
+ok(cdp.tabs() == [] or cdp.available(), "cdp.tabs CDP無し＝空")
+ok(cdp.chrome_path() is None or cdp.chrome_path().lower().endswith("chrome.exe"), "chrome_path 形式")
+import voice as _v2
+_v2._set_state("thinking")
+ok(_v2._STATE_PATH.read_text(encoding="utf-8").strip() == "thinking", "orb_state.txt 書き込み")
+_v2._set_state("idle")
+
 # ---------------------------------------------------------------- 結果
 print(f"\n{'='*40}\n結果: PASS {PASS} / FAIL {FAIL}")
 if FAILS:

@@ -52,6 +52,26 @@ def _read_json(path: Path) -> dict:
         return json.load(f)
 
 
+def _open_in_browser(url: str) -> None:
+    """URLを開く（全open系の共通経路）。Windows では CDP（タブ管理できる Chrome）を優先する。
+
+    優先順位（ADR-0040）: ①CDPが生きてる→CDPでタブを開く（後で確実に閉じられる）
+    ②Chrome未起動→デバッグポート付きで起動（次回からタブ管理可能に）③それ以外→既定ブラウザ
+    （既にフラグ無しChromeが居る場合。タブの後片付けは不可＝従来どおり）。
+    """
+    if IS_WINDOWS:
+        try:
+            import cdp
+            import win_ops
+            if cdp.available() and cdp.open_tab(url):
+                return
+            if not win_ops.app_is_running("chrome.exe") and cdp.launch_chrome_with_cdp(url):
+                return
+        except Exception:
+            pass
+    webbrowser.open(url)
+
+
 def load_config() -> dict:
     """2層（auto + user）をマージして返す。user が auto を上書き。
 
@@ -190,7 +210,7 @@ def open_site(name: str) -> str:
         return f"『{name}』に対応するサイトが {CONFIG_HINT} にありません。"
     if url.startswith("https://("):  # まだ書き換えてないプレースホルダ
         return f"『{name}』のURLが未設定です（{CONFIG_HINT} を書き換えてください）。"
-    webbrowser.open(url)
+    _open_in_browser(url)
     return f"{name} を開きました（{url}）。"
 
 
@@ -327,7 +347,7 @@ def web_search(query: str) -> str:
     if not query or not query.strip():
         return "検索語が空です。"
     url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
-    webbrowser.open(url)
+    _open_in_browser(url)
     _EPHEMERAL_OPENED.append(url)
     return f"「{query}」を検索しました。"
 
@@ -339,7 +359,7 @@ def open_url(url: str) -> str:
     target = url.strip()
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
-    webbrowser.open(target)
+    _open_in_browser(target)
     _EPHEMERAL_OPENED.append(target)
     return f"{target} を開きました。"
 
@@ -439,7 +459,7 @@ def get_weather(location: str = "") -> str:
         except Exception as e:
             return f"{loc} の天気が取得できませんでした（{type(e).__name__}）。"
     if SHOW_WEATHER_PAGE:
-        webbrowser.open(page)            # 見せる
+        _open_in_browser(page)           # 見せる
         _EPHEMERAL_OPENED.append(page)   # 用が済んだら次ターンで閉じる
     return summary
 
@@ -462,11 +482,11 @@ def play_media(query: str, kind: str = "video") -> str:
             subprocess.Popen(["open", f"spotify:search:{urllib.parse.quote(q)}"])
             return f"Spotify で「{q}」を検索しました（流せます・残します）。"
         url = "https://open.spotify.com/search/" + urllib.parse.quote(q)
-        webbrowser.open(url)
+        _open_in_browser(url)
         return f"Spotify（Web）で「{q}」を開きました（残します）。"
     # 既定：動画 → YouTube 検索
     url = "https://www.youtube.com/results?search_query=" + urllib.parse.quote_plus(q)
-    webbrowser.open(url)
+    _open_in_browser(url)
     return f"YouTube で「{q}」を検索して開きました（残します）。"
 
 
@@ -790,6 +810,16 @@ def _close_app_win(name: str = "") -> str:
     sites = cfg.get("sites", {})
     if target_name in sites:  # サイト名（PWA/タブのタイトルに出ることが多い）
         cands.append(target_name)
+
+    # ⓪ Chrome のタブとして開いているなら、まずタブ単位で閉じる（CDP・ブラウザ本体は巻き込まない）
+    try:
+        import cdp
+        closed = cdp.close_by_title([c for c in cands if c])
+        if closed:
+            return f"{target_name} のタブを閉じました。"
+    except Exception:
+        pass
+
     if win_ops.close_window_by_title(cands):
         return f"{target_name} を閉じました。"
 
@@ -838,11 +868,18 @@ def close_app(name: str = "") -> str:
 
 
 def close_browser_tabs(urls: "list[str]") -> int:
-    """指定URLに一致するブラウザタブを閉じる（ephemeralの後片付け・Mac/Chrome）。
+    """指定URLに一致するブラウザタブを閉じる（ephemeralの後片付け）。
 
-    閉じた数を返す。Chrome以外・未起動・権限未許可などは静かに0で返す（本体を止めない）。
-    ※初回は macOS の「"Terminal"が"Google Chrome"を制御」許可が要る。
+    Windows: CDP（タブ管理できる Chrome）経由。CDP 無しなら 0（閉じられない＝正直に劣化）。
+    Mac: AppleScript。初回は「"Terminal"が"Google Chrome"を制御」許可が要る。
+    閉じた数を返す。失敗しても本体を止めない。
     """
+    if IS_WINDOWS and urls:
+        try:
+            import cdp
+            return cdp.close_by_url(urls)
+        except Exception:
+            return 0
     if not IS_MAC or not urls:
         return 0
     closed = 0
@@ -901,6 +938,26 @@ def monitor_count() -> int:
         return 1
 
 
+def windows_summary() -> str:
+    """『どの画面に何のウィンドウがあるか』の1行要約（毎ターンLLMへ渡す材料・⑦）。
+
+    例: "mon1: 電卓 / GitHub - Chrome｜mon2: Discord"。Windows以外・失敗時は空文字。
+    """
+    if not IS_WINDOWS:
+        return ""
+    try:
+        import win_ops
+        wins = win_ops.windows_overview()
+    except Exception:
+        return ""
+    if not wins:
+        return ""
+    by_mon: dict = {}
+    for idx, title in wins:
+        by_mon.setdefault(idx, []).append(title)
+    return "｜".join(f"mon{i}: " + " / ".join(ts) for i, ts in sorted(by_mon.items()))
+
+
 # Claude に渡すツール定義（tool use）
 TOOL_DEFS = [
     {
@@ -949,16 +1006,14 @@ TOOL_DEFS = [
     },
     {
         "name": "manage_window",
-        "description": "Tile/place a window. action = left/right/maximize/center/list (half-screen split / fill / center). "
-                       "app = target (empty = frontmost). monitor = which physical screen on multi-monitor setups: "
-                       "left/right (or a number); empty = current screen. 画面/モニタ/スクリーン words map to monitor, "
-                       "半分/左右の配置 map to action. e.g. 左の画面にDiscord → action=maximize, app=Discord, monitor=left.",
+        "description": "Tile/place a window. app empty = frontmost. monitor: which screen (left/right/number, "
+                       "empty = current). Usage rules are in the system prompt.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["left", "right", "maximize", "center", "list"]},
                 "app": {"type": "string"},
-                "monitor": {"type": "string", "description": "left / right / number / empty(=current screen)"},
+                "monitor": {"type": "string"},
             },
             "required": ["action"],
         },
@@ -970,12 +1025,13 @@ TOOL_DEFS = [
     },
     {
         "name": "add_schedule",
-        "description": "Save an event. Weekly recurring: weekday(月〜日)+once=false. One-off on the next given weekday (来週の○曜/今度の○曜): weekday+once=true (system computes the date; leave date empty). Specific day: date=YYYY-MM-DD. time=HH:MM.",
+        "description": "Save an event. Weekly: weekday(月〜日). One-off next given weekday (来週の○曜): "
+                       "weekday+once=true (date stays empty; system computes it). Specific day: date=YYYY-MM-DD.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
-                "weekday": {"type": "string", "description": "月〜日"},
+                "weekday": {"type": "string"},
                 "once": {"type": "boolean"},
                 "date": {"type": "string", "description": "YYYY-MM-DD"},
                 "time": {"type": "string", "description": "HH:MM"},

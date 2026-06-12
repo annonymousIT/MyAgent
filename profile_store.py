@@ -200,7 +200,8 @@ def context_text(now: "datetime.datetime | None" = None) -> str:
         return f"{rel}{d.month}/{d.day}({_WD_JA[d.weekday()]})"
     monday = today - datetime.timedelta(days=today.weekday())
     weeks = []
-    for wi, wlabel in enumerate(("今週", "来週", "再来週")):
+    # 2週分で十分（来週の◯曜まで解決できる）。再来週分はトークンの無駄が大きいので削った（コスト最適化）。
+    for wi, wlabel in enumerate(("今週", "来週")):
         days = [monday + datetime.timedelta(days=wi * 7 + j) for j in range(7)]
         days = [d for d in days if d >= today]
         if days:

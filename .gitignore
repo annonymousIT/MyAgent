@@ -26,3 +26,6 @@ costs.jsonl
 
 # ユーザー設定（声など・マシン固有）
 settings.json
+
+# orb⇔voice の状態連携ファイル（実行時生成）
+orb_state.txt
