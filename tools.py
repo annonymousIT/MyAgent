@@ -1024,6 +1024,26 @@ def cancel_timers() -> str:
     return f"タイマーを{n}件キャンセルしました。" if n else "セット中のタイマーはありません。"
 
 
+def get_mail(limit: int = 8) -> str:
+    """未読Gmailの差出人・件名・日時を返す（本文は取らない・ADR-0044）。「メール来てる？」用。
+
+    返した一覧をモデルが人格で要約・読み上げする。捏造防止：実際の中身だけを根拠にする。
+    未設定なら設定方法を返す（落ちない）。
+    """
+    try:
+        import mail_src
+        rows = mail_src.recent_unread(limit)
+    except Exception:
+        rows = []
+    if rows:
+        body = "\n".join(f"{who}／{subj}／{when}" for who, subj, when in rows)
+        return f"未読メール{len(rows)}件:\n{body}"
+    import os
+    if not (os.environ.get("GMAIL_ADDRESS") and os.environ.get("GMAIL_APP_PASSWORD")):
+        return "メール連携が未設定です（.env に GMAIL_ADDRESS と GMAIL_APP_PASSWORD が必要）。"
+    return "新しい未読メールはありません。"
+
+
 def read_clipboard() -> str:
     """クリップボードのテキストを読む（「コピーしたやつ読んで/要約して/翻訳して」の材料）。
 
@@ -1204,6 +1224,11 @@ TOOL_DEFS = [
         "description": "Read clipboard text (コピーしたやつ/クリップボード 読んで・要約して・翻訳して). Returns the real content to base your reply on.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "get_mail",
+        "description": "Read recent unread Gmail — sender/subject/time only, no body (メール来てる?/メール確認/新着メール). Summarize in your own voice; never invent senders/subjects.",
+        "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}},
+    },
 ]
 
 # ツール名 → 実関数
@@ -1224,6 +1249,7 @@ DISPATCH = {
     "set_timer": set_timer,
     "cancel_timers": cancel_timers,
     "read_clipboard": read_clipboard,
+    "get_mail": get_mail,
 }
 
 

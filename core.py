@@ -42,6 +42,31 @@ PERSONA_PATH = BASE / "persona.txt"
 ENV_PATH = BASE / ".env"
 
 
+def _load_dotenv() -> None:
+    """.env の KEY=VALUE を os.environ に読み込む（既存の環境変数は上書きしない）。
+
+    これまで ANTHROPIC_API_KEY だけ個別に拾っていたため、GOOGLE_ICAL_URL 等を .env に入れても
+    os.environ に載らず効かなかった（calendar_src 等が見えない）。ここで一般化する。
+    core は全エントリポイントが import するので、各モジュールが環境変数を読む前にここで一度ロードされる。
+    """
+    if not ENV_PATH.exists():
+        return
+    try:
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            if k and k not in os.environ:
+                os.environ[k] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+
+
+_load_dotenv()  # import 時に一度（calendar_src 等が os.environ を読む前に）
+
+
 def load_api_key() -> "str | None":
     """環境変数を優先。無ければ .env から ANTHROPIC_API_KEY を拾う。"""
     key = os.environ.get("ANTHROPIC_API_KEY")
@@ -145,14 +170,34 @@ def static_menu() -> str:
     )
 
 
-def volatile_context() -> str:
+# 予定ブロックを載せるべきターンか判定する語（予定・日付・時間・挨拶・過去/未来）。
+# 高速パスと同じ「要る時だけ払う」思想：これらを含まない雑談/操作ターンでは予定を注入せずトークンを節約。
+# 過剰検知（載せ過ぎ）は数十トークンの損だけ、過小検知（必要な時に無い）は機能欠落なので、広めに取る。
+_SCHED_WORDS = (
+    "予定", "よてい", "スケジュール", "カレンダー", "TODO", "タスク", "やること",
+    "明日", "あした", "今日", "きょう", "明後日", "あさって", "今週", "来週", "週末", "平日",
+    "昨日", "きのう", "一昨日", "さっき", "この前", "この後", "あと", "今度", "次",
+    "ただいま", "おはよ", "おやすみ", "いってき", "いってらっ", "ねる", "寝る", "帰っ", "帰宅",
+    "デート", "予約", "授業", "バイト", "面接", "何時", "何日", "いつ", "空いて", "暇", "ひま",
+    "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜",
+)
+
+
+def _schedule_relevant(text: str) -> bool:
+    """このターンが予定/日付/挨拶に関係するか（＝予定ブロックを注入すべきか）。"""
+    return any(w in (text or "") for w in _SCHED_WORDS)
+
+
+def volatile_context(user_input: str = "") -> str:
     """Per-turn changing part (not cached). データだけを置き、説明文は static_menu（キャッシュ側）に置く
-    （毎ターン非キャッシュで課金されるのはここだけなので、変わらない文章を混ぜない＝コスト最適化）。"""
+    （毎ターン非キャッシュで課金されるのはここだけなので、変わらない文章を混ぜない＝コスト最適化）。
+
+    予定ブロックは『予定/挨拶などのターンだけ』載せる（user_input から判定）→ 無関係ターンで数百トークン節約。"""
     running = "、".join(tools.running_apps()) or "(none)"
     n_mon = tools.monitor_count()
     win_line = tools.windows_summary() if n_mon else ""
     return (
-        profile_store.context_text()
+        profile_store.context_text(include_schedule=_schedule_relevant(user_input))
         + f"\n[Monitors]: {n_mon}\n[Running apps]: {running}"
         + (f"\n[Windows now]: {win_line}" if win_line else "")
     )
@@ -180,16 +225,17 @@ _CACHE_CTL = {"type": "ephemeral", "ttl": "1h"} if _CACHE_TTL in ("1h", "1hr", "
 _DEBUG_CALLS = os.environ.get("MYAGENT_DEBUG_CALLS", "1") not in ("0", "false", "")
 
 
-def build_system_prompt(persona: str):
+def build_system_prompt(persona: str, user_input: str = ""):
     """System prompt as 2 blocks for prompt caching (コスト最適化):
     - stable block (rules + persona + static menu) carries cache_control -> also caches
       the tools (rendered before system). Reused across the multi-round loop & bursts at ~0.1x.
     - volatile block (current time / profile / running apps) sits after the breakpoint, uncached.
+    user_input は揮発側の予定ブロック注入判定にのみ使う（安定ブロックは不変＝キャッシュ維持）。
     """
     stable = _RULES + "\n\n" + persona + "\n\n" + static_menu()
     return [
         {"type": "text", "text": stable, "cache_control": _CACHE_CTL},
-        {"type": "text", "text": volatile_context()},
+        {"type": "text", "text": volatile_context(user_input)},
     ]
 
 
@@ -314,7 +360,7 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
                     "usage": {"in": 0, "out": 0, "cw": 0, "cr": 0, "calls": 0, "yen": 0.0},
                     "cost": {"turn": 0.0, "today": 0.0, **st}, "blocked": True}
 
-    system_prompt = build_system_prompt(persona)  # 人格 ＋ ②材料（利用可能な操作一覧）
+    system_prompt = build_system_prompt(persona, user_input)  # 人格＋操作一覧＋（予定関連なら予定）
     messages = history + [{"role": "user", "content": user_input}]
 
     # 今ターンの実測使用量（全API呼び出し合算：ループ＋ガード＋言い換え）→ _finishで円換算

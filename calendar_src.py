@@ -16,21 +16,21 @@ import datetime
 import os
 import urllib.request
 
-ICAL_URL = os.environ.get("GOOGLE_ICAL_URL", "").strip()
-CACHE_TTL = int(os.environ.get("GOOGLE_ICAL_TTL", "1800"))  # 秒
-
 _cache: "dict" = {"raw": None, "at": None}  # 取得した.icsバイト列と取得時刻（monotonicでなくwallで可）
 
 
 def _fetch_ics(now: datetime.datetime) -> "bytes | None":
     """.ics を取得（TTL内はキャッシュ）。失敗時は直近キャッシュ or None。"""
-    if not ICAL_URL:
+    # URL/TTL は呼び出し時に読む（.env ロードや import 順に左右されないように）。
+    ical_url = os.environ.get("GOOGLE_ICAL_URL", "").strip()
+    cache_ttl = int(os.environ.get("GOOGLE_ICAL_TTL", "1800"))
+    if not ical_url:
         return None
     if _cache["raw"] is not None and _cache["at"] is not None:
-        if (now - _cache["at"]).total_seconds() < CACHE_TTL:
+        if (now - _cache["at"]).total_seconds() < cache_ttl:
             return _cache["raw"]
     try:
-        url = "https://" + ICAL_URL.split("://", 1)[1] if "://" in ICAL_URL else ICAL_URL
+        url = "https://" + ical_url.split("://", 1)[1] if "://" in ical_url else ical_url
         req = urllib.request.Request(url, headers={"User-Agent": "MyAgent/1.0"})
         raw = urllib.request.urlopen(req, timeout=6).read()
         _cache["raw"], _cache["at"] = raw, now
@@ -39,10 +39,9 @@ def _fetch_ics(now: datetime.datetime) -> "bytes | None":
         return _cache["raw"]  # 取れなければ前回分（無ければNone）
 
 
-def upcoming_events(days: int = 7, today: "datetime.date | None" = None):
-    """今日から days 日分の予定を [(date, "HH:MM"|"", title), ...] で返す。失敗時は []。"""
+def _events_between(start: datetime.date, end: datetime.date):
+    """[start, end) の予定を [(date, "HH:MM"|"", title), ...] で返す。失敗時は []。"""
     now = datetime.datetime.now()
-    today = today or now.date()
     raw = _fetch_ics(now)
     if not raw:
         return []
@@ -50,8 +49,7 @@ def upcoming_events(days: int = 7, today: "datetime.date | None" = None):
         import icalendar
         import recurring_ical_events
         cal = icalendar.Calendar.from_ical(raw)
-        end = today + datetime.timedelta(days=days)
-        evs = recurring_ical_events.of(cal).between(today, end)
+        evs = recurring_ical_events.of(cal).between(start, end)
     except Exception:
         return []
 
@@ -66,9 +64,21 @@ def upcoming_events(days: int = 7, today: "datetime.date | None" = None):
                 d, tm = dt.date(), dt.strftime("%H:%M")
             else:  # 終日予定（date）
                 d, tm = dt, ""
-            if today <= d < end:
+            if start <= d < end:
                 out.append((d, tm, title))
         except Exception:
             continue
     out.sort(key=lambda x: (x[0], x[1]))
     return out
+
+
+def upcoming_events(days: int = 7, today: "datetime.date | None" = None):
+    """今日から days 日分の予定を返す。失敗時は []。"""
+    today = today or datetime.datetime.now().date()
+    return _events_between(today, today + datetime.timedelta(days=days))
+
+
+def past_events(days: int = 7, today: "datetime.date | None" = None):
+    """過去 days 日分（今日は含まない）の予定を返す。「昨日のデートどう？」等の話題用。失敗時は []。"""
+    today = today or datetime.datetime.now().date()
+    return _events_between(today - datetime.timedelta(days=days), today)

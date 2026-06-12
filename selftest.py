@@ -186,6 +186,12 @@ ok(isinstance(win_ops.foreground_is_fullscreen(), bool), "foreground_is_fullscre
 import cdp
 ok(isinstance(cdp.available(), bool), "cdp.available（未起動でも安全に bool）")
 ok(cdp.close_by_url([]) == 0, "cdp.close_by_url 空リスト＝0")
+# Gmail（IMAP・未設定でも落ちず案内を返す / 過去予定の取得が空でも安全）
+import mail_src
+ok(isinstance(mail_src.recent_unread(), list), "mail_src.recent_unread が安全にlist（未設定/オフラインでも落ちない）")
+ok("get_mail" in tools.DISPATCH and isinstance(tools.get_mail(), str), "get_mail ツールが文字列を返す")
+import calendar_src as _cs
+ok(isinstance(_cs.past_events(7), list), "calendar_src.past_events（過去1週間）が安全にlist")
 
 # ---------------------------------------------------------------- 高速パス（ADR-0043・誤爆ガードが命）
 section("fastpath 意図ルーティング")

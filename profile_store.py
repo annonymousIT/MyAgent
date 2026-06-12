@@ -182,32 +182,18 @@ def upcoming(days: int = 7, today: "datetime.date | None" = None) -> "list[tuple
 # --------------------------------------------------------------------------
 # システムプロンプト注入文（毎ターン）
 # --------------------------------------------------------------------------
-def context_text(now: "datetime.datetime | None" = None) -> str:
-    """現在日時＋プロフィール＋直近予定を簡潔にまとめた注入文。
+def context_text(now: "datetime.datetime | None" = None, include_schedule: bool = True) -> str:
+    """現在日時＋プロフィール＋（予定の話題なら）予定を簡潔にまとめた注入文。
 
     ここに書かれたものだけが「記憶している事実」。無いことは捏造しない（personaにも明記）。
+    include_schedule=False（＝予定と無関係なターン）では Date map と予定ブロックを省きトークンを節約する。
     """
     now = now or datetime.datetime.now()
     today = now.date()
     p = load()
     lines = [f"[Now] {today.isoformat()}({_WD_JA[today.weekday()]}) {now.strftime('%H:%M')}"]
 
-    # Date map (this/next/week-after, with weekday). Resolve 来週の月曜 etc. by lookup, never compute.
-    def _fmt(d):
-        rel = "今日" if d == today else ("明日" if d == today + datetime.timedelta(days=1) else "")
-        # %-m/%-d（ゼロ埋め無し）は Linux/Mac 専用で Windows の strftime では落ちる。
-        # 月日は直接組んで OS 非依存にする。
-        return f"{rel}{d.month}/{d.day}({_WD_JA[d.weekday()]})"
-    monday = today - datetime.timedelta(days=today.weekday())
-    weeks = []
-    # 2週分で十分（来週の◯曜まで解決できる）。再来週分はトークンの無駄が大きいので削った（コスト最適化）。
-    for wi, wlabel in enumerate(("今週", "来週")):
-        days = [monday + datetime.timedelta(days=wi * 7 + j) for j in range(7)]
-        days = [d for d in days if d >= today]
-        if days:
-            weeks.append(f"{wlabel}: " + "、".join(_fmt(d) for d in days))
-    lines.append("[Date map — resolve relative dates like 来週の月曜 from this; never compute]\n" + "\n".join(weeks))
-
+    # 記憶（プロフィール・事実）は常時載せる。
     prof = []
     user = p.get("user", {})
     if user.get("name"):
@@ -224,29 +210,47 @@ def context_text(now: "datetime.datetime | None" = None) -> str:
     else:
         lines.append("[About the user] nothing remembered yet (use remember to save).")
 
-    # ローカル予定 ＋ Googleカレンダー(iCal読み取り)をマージ（ADR-0034）。失敗しても落ちない。
-    ups = list(upcoming(7, today))
-    try:
-        import calendar_src
-        ups += calendar_src.upcoming_events(7, today)
-    except Exception:
-        pass
-    # 重複排除（同日・同時刻・同タイトル）＋ ソート
-    seen, merged = set(), []
-    for d, t, title in sorted(ups, key=lambda x: (x[0], x[1])):
-        k = (d, t, title)
-        if k not in seen:
-            seen.add(k)
-            merged.append(k)
-    if merged:
-        rows = []
-        for d, t, title in merged:
+    # 予定ブロック（Date map＋過去1週間＋未来7日）は『予定/挨拶などのターンだけ』載せる（ADR-0034改・コスト）。
+    if include_schedule:
+        def _fmt(d):
             rel = "今日" if d == today else ("明日" if d == today + datetime.timedelta(days=1) else "")
-            label = f"{rel}{d.strftime('%m/%d')}({_WD_JA[d.weekday()]})"
-            rows.append(f"{label} {t or '時刻未定'} {title}")
-        lines.append("[Next 7 days — saved events + Google Calendar]\n- " + "\n- ".join(rows))
-    else:
-        lines.append("[Next 7 days] none (if asked about plans, honestly say none).")
-    lines.append("Never invent anything not in the memory/schedule above; if unknown, say 記憶にない or ask. "
-                 "Judge 明日/今日 from [Now]; never compute dates yourself.")
+            return f"{rel}{d.month}/{d.day}({_WD_JA[d.weekday()]})"  # %-m は Windows で落ちるので直接組む
+        monday = today - datetime.timedelta(days=today.weekday())
+        weeks = []
+        for wi, wlabel in enumerate(("今週", "来週")):  # 2週分で「来週の◯曜」まで解決できる
+            days = [d for d in (monday + datetime.timedelta(days=wi * 7 + j) for j in range(7)) if d >= today]
+            if days:
+                weeks.append(f"{wlabel}: " + "、".join(_fmt(d) for d in days))
+        lines.append("[Date map — resolve relative dates like 来週の月曜 from this; never compute]\n" + "\n".join(weeks))
+
+        def _row(d, t, title):
+            rel = "今日" if d == today else ("明日" if d == today + datetime.timedelta(days=1) else "")
+            return f"{rel}{d.strftime('%m/%d')}({_WD_JA[d.weekday()]}) {t or '時刻未定'} {title}"
+
+        cal, cal_past = [], []
+        try:
+            import calendar_src
+            cal = calendar_src.upcoming_events(7, today)
+            cal_past = calendar_src.past_events(7, today)  # 過去1週間（「昨日のデートどう？」用）
+        except Exception:
+            pass
+
+        # 未来：カレンダー（正本）とローカル（口頭で覚えた分）を出典分離（同日同時刻はカレンダー優先で重複排除）
+        cal_keys = {(d, t) for d, t, _ in cal}
+        local_only = [(d, t, ti) for d, t, ti in upcoming(7, today) if (d, t) not in cal_keys]
+        if cal:
+            rows = [_row(*e) for e in sorted(cal, key=lambda x: (x[0], x[1]))]
+            lines.append("[Google Calendar — 直近7日・あなたが管理する外部カレンダー（予定を聞かれたら必ずここを見る）]\n- "
+                         + "\n- ".join(rows))
+        if local_only:
+            rows = [_row(*e) for e in sorted(local_only, key=lambda x: (x[0], x[1]))]
+            lines.append("[口頭で覚えた予定 — あなたが直接教えてくれた分（カレンダーには無いもの）]\n- " + "\n- ".join(rows))
+        if not cal and not local_only:
+            lines.append("[Next 7 days] none (if asked about plans, honestly say none).")
+        if cal_past:
+            rows = [_row(*e) for e in sorted(cal_past, key=lambda x: (x[0], x[1]))]
+            lines.append("[過去1週間の予定 — 「昨日どうだった？」等を自然に聞ける材料]\n- " + "\n- ".join(rows))
+        lines.append("予定を聞かれたら Google Calendar と『口頭で覚えた予定』の両方を見て答える。"
+                     "Never invent anything not above; if unknown, say 記憶にない or ask. "
+                     "Judge 明日/今日 from [Now]; never compute dates yourself.")
     return "\n".join(lines)
