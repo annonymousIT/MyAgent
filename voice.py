@@ -259,7 +259,16 @@ def _add_cuda_dll_dirs() -> None:
     """
     import glob
     base = Path(__file__).parent
-    cands = [str(base / "cuda")]
+    cuda_dir = base / "cuda"
+    cands = [str(cuda_dir)]
+    # 7z をサブフォルダごと展開しても拾えるよう、cuda/ 配下で DLL を含むディレクトリを全部追加
+    if cuda_dir.is_dir():
+        seen = set()
+        for dll in cuda_dir.rglob("*.dll"):
+            d = str(dll.parent)
+            if d not in seen:
+                seen.add(d)
+                cands.append(d)
     cands += glob.glob(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12*\bin")
     cands += glob.glob(str(base / ".venv" / "Lib" / "site-packages" / "nvidia" / "*" / "bin"))
     for d in cands:
