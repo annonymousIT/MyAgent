@@ -283,24 +283,77 @@ def _place(hwnd: int, action: str, rect: tuple, true_maximize: bool) -> None:
     user32.MoveWindow(hwnd, rx, ry, rw, rh, True)
 
 
-def manage_window(action: str, exe: str = "", monitor: str = "") -> "tuple[bool, str]":
-    """ウィンドウ配置。exe 指定があればそのアプリの窓、無ければ最前面の窓を動かす。
+class _WINDOWPLACEMENT(ctypes.Structure):
+    _fields_ = [("length", wintypes.UINT), ("flags", wintypes.UINT), ("showCmd", wintypes.UINT),
+                ("ptMinPosition", wintypes.POINT), ("ptMaxPosition", wintypes.POINT),
+                ("rcNormalPosition", wintypes.RECT)]
 
-    monitor: "" なら現在の画面（OS最大化が使える）。"left"/"right"/番号 なら、そのモニタの
-    作業領域に対して action（左半分/右半分/最大化/中央）を適用する＝「左の画面にDiscord」が通る。
-    起動直後は窓生成に時間差があるため、exe 指定時は数回リトライして待つ（Mac版と同趣旨）。
+
+def _find_window_by_title(cands: "list[str]") -> "int | None":
+    """タイトルに候補語を含む“本体”ウィンドウを返す（exe より信頼できる）。
+
+    Discord は登録 exe がランチャー(Update.exe)、Spotify 等 UWP は exe 無しで exe 探索が当たらないが、
+    タイトル（"… - Discord" / "Spotify Premium" / "GitHub … - Chrome"）は当たる。
+    ただしアプリは同名のヘルパー窓（最小化・160x28等）も持つので、オーナー付き/ツール窓を除外し、
+    “復元時のサイズが最大”の窓＝本体を選ぶ。
+    """
+    cl = [c.lower() for c in cands if c and len(c) >= 2]
+    if not cl:
+        return None
+    best = {"hwnd": None, "area": -1}
+    GW_OWNER, GWL_EXSTYLE, WS_EX_TOOLWINDOW = 4, -20, 0x80
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _cb(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        if not any(c in buf.value.lower() for c in cl):
+            return True
+        if user32.GetWindow(hwnd, GW_OWNER):                  # オーナー付き＝補助窓
+            return True
+        if user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW:  # ツール窓
+            return True
+        wp = _WINDOWPLACEMENT()
+        wp.length = ctypes.sizeof(_WINDOWPLACEMENT)
+        area = 0
+        if user32.GetWindowPlacement(hwnd, ctypes.byref(wp)):  # 復元時サイズ＝本体らしさ
+            r = wp.rcNormalPosition
+            area = max(0, r.right - r.left) * max(0, r.bottom - r.top)
+        if area > best["area"]:
+            best["hwnd"], best["area"] = hwnd, area
+        return True
+
+    user32.EnumWindows(_cb, 0)
+    return best["hwnd"]
+
+
+def manage_window(action: str, exe: str = "", monitor: str = "", titles=None) -> "tuple[bool, str]":
+    """ウィンドウ配置。titles（タイトル候補）→exe の順で対象窓を探す。アプリ指定がある（titles/exe）
+    のに窓が見つからなければ、前面の別窓を動かさず**正直に失敗を返す**（誤って関係ない窓を動かさない）。
+    titles も exe も空のときだけ最前面の窓を動かす（「これを右に」等）。
+
+    monitor: "" なら現在の画面（OS最大化）。"left"/"right"/番号 ならそのモニタ基準で action を適用。
     """
     hwnd = None
-    if exe:
-        for _ in range(6):  # 窓生成待ち（最大 ~3秒）
-            hwnd = _find_window_by_exe(exe)
+    if titles or exe:
+        for _ in range(5):  # 窓生成待ち（起動直後のラグ・最大 ~2秒）
+            hwnd = _find_window_by_title(titles) if titles else None
+            if not hwnd and exe:
+                hwnd = _find_window_by_exe(exe)
             if hwnd:
                 break
-            time.sleep(0.5)
+            time.sleep(0.4)
+        if not hwnd:
+            return False, "対象のウィンドウが見つかりません（起動していない可能性）。"
     else:
         hwnd = user32.GetForegroundWindow()
-    if not hwnd:
-        return False, "対象のウィンドウが見つかりませんでした（起動済みか確認してください）。"
+        if not hwnd:
+            return False, "前面のウィンドウが取得できませんでした。"
     try:
         rect, true_max = _target_rect(monitor)
         _place(hwnd, action, rect, true_max)

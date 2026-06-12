@@ -683,21 +683,34 @@ def _manage_window_win(action: str, app: str = "", monitor: str = "") -> str:
     if act not in ("left", "right", "maximize", "center"):
         return "未対応の操作です（left / right / maximize / center / list）。"
 
+    # 対象窓は「タイトル候補」で探す（exeはランチャー/UWPで当たらないため・close と同じ方式）。
     exe = ""
+    titles = None
     if app and app.strip():
-        exe = _app_exe(load_config().get("apps", {}), app)
-        # 対象が起動していなければ起動して窓の生成を待つ（PWA未起動でも自己修復）
-        if exe and not win_ops.app_is_running(exe):
-            launch_app(app)
-            time.sleep(1.3)
+        entry = _resolve_entry(load_config().get("apps", {}), app)
+        exe = entry.get("exe", "") if isinstance(entry, dict) else ""
+        titles = [app.strip()]
+        if isinstance(entry, dict):
+            titles.append(entry.get("name", ""))
+            titles += entry.get("aliases", []) or []
+            titles.append(Path(entry.get("exe", "")).stem)
+        titles = [t for t in titles if t]
 
     label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
     where = {"left": "左の画面の", "right": "右の画面の"}.get((monitor or "").strip().lower(), "")
-    ok, msg = win_ops.manage_window(act, exe, monitor)
+
+    ok, msg = win_ops.manage_window(act, exe, monitor, titles=titles)
+    if not ok and app and app.strip():     # 窓が無い→起動してから一度だけ再配置（自己修復）
+        launch_app(app)
+        time.sleep(1.6)
+        ok, msg = win_ops.manage_window(act, exe, monitor, titles=titles)
+
     if ok:
         who = app.strip() if (app and app.strip()) else "最前面のウィンドウ"
         return f"{who} を{where}{label}に配置しました。"
-    return f"ウィンドウを{where}{label}に配置できませんでした（{msg}）。"
+    # 失敗は正直に。LLM が成功と捏造しないよう明示する。
+    return (f"（未配置・失敗）{app or '対象'} のウィンドウが見つかりませんでした（{msg}）。"
+            "成功したと言わず、ユーザーに開いているか確認してください。")
 
 
 def manage_window(action: str, app: str = "", monitor: str = "", _relaunched: bool = False) -> str:
