@@ -134,6 +134,35 @@ def _record_utterance(stream: "sd.InputStream") -> "np.ndarray | None":
     return np.concatenate(voiced)
 
 
+def _record_while_held(mic: "sd.InputStream", vk: int) -> "np.ndarray | None":
+    """PTT：指定キー（既定 右Ctrl）を押している間だけ録音する。環境音を一切拾わない＝うるさくても確実。"""
+    import ctypes
+    u = ctypes.windll.user32
+    PRESSED = 0x8000
+    while not (u.GetAsyncKeyState(vk) & PRESSED):   # 押されるまで待つ
+        time.sleep(0.03)
+    print("🎤 録音中（離すと送信）…", end="\r", flush=True)
+    _flush_mic_global(mic)                          # 押した瞬間より前の音は捨てる
+    frames: "list[np.ndarray]" = []
+    while u.GetAsyncKeyState(vk) & PRESSED:         # 押している間だけ録る
+        try:
+            block, _ = mic.read(FRAME)
+        except Exception:
+            break
+        frames.append(block[:, 0])
+    if len(frames) < MIN_SPEECH_FRAMES:
+        return None
+    return np.concatenate(frames)
+
+
+def _flush_mic_global(mic: "sd.InputStream") -> None:
+    try:
+        while mic.read_available >= FRAME:
+            mic.read(FRAME)
+    except Exception:
+        pass
+
+
 def _build_vocab_hint() -> str:
     """Whisper の initial_prompt 用の語彙ヒント。想定する命令語・アプリ名を先に教えて誤認識を減らす
     （例「メモ」→「目も」、「電卓」→「電端」を抑える）。
@@ -239,11 +268,21 @@ def main() -> None:
     history: list = []
     pending_eph: list = []   # 前ターンで開いた一時タブ（次の発話の頭で閉じる）
     pending_front = ""       # 一時タブを開く前に前面だったアプリ（閉じた後ここへ戻す）
-    awake_until = 0.0        # この時刻まではウェイクワード無しで連続会話できる
+    awake_until = 0.0        # この時刻まではウェイクワード無しで連続会話できる（wakeモード用）
 
-    print(f"🎤 音声入力モード。毎回「{WAKE_PHRASE}」と呼びかけてから話してください"
-          "（聞き返された時だけ、そのまま答えてOK / 「終了」で停止 / Ctrl+C でも可）", flush=True)
-    speak_mod.speak(f"音声モードです。{WAKE_PHRASE}、と呼んでくださいね。", block=True)
+    _s = settings.load()
+    mode = _s.get("input_mode", "ptt")
+    ptt_vk = int(_s.get("ptt_key", 163))
+    if mode == "ptt" and not speak_mod.IS_WINDOWS:  # PTT は GetAsyncKeyState 依存＝Windows のみ
+        mode = "wake"
+    if mode == "ptt":
+        print("🎤 PTTモード。右Ctrlを押している間だけ話してください（うるさい環境でも確実 / 「終了」で停止）",
+              flush=True)
+        speak_mod.speak("はい、マスター。右コントロールを押しながら、どうぞ。", block=True)
+    else:
+        print(f"🎤 ウェイクワードモード。毎回「{WAKE_PHRASE}」と呼びかけて話してください"
+              "（聞き返された時だけそのまま答えてOK / 「終了」で停止）", flush=True)
+        speak_mod.speak(f"音声モードです。{WAKE_PHRASE}、と呼んでくださいね。", block=True)
 
     # マイクは開きっぱなしで使い回す（毎回 open すると数百ms ロスし発話の頭も欠ける・#34）
     mic = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME)
@@ -259,34 +298,43 @@ def main() -> None:
 
     while True:
         try:
-            print("🎤 …", end="\r", flush=True)
-            _flush_mic()  # 直前の読み上げ中に溜まった音（自分の声）を捨ててから聞く
-            audio = _record_utterance(mic)
-            if audio is None:
-                continue
-            text = _transcribe(model, audio, vocab_hint)
-            if not text or _is_noise(text):
-                if text:
-                    print(f"🔉 聞こえた（雑音扱いで無視）: 「{text}」", flush=True)
-                continue
-            print(f"🔉 聞こえた: 「{text}」", flush=True)  # 認識した全発話を表示（デバッグ）
-
-            # ウェイクワードのゲート（ADR-0038）。起動中ウィンドウ外で、ウェイクワードを含まない
-            # 発話（ゲーム中の声・通話・独り言）は完全に無視する＝誤爆しない。
-            now = time.time()
-            wake_cmd = _find_wake(text)
-            if wake_cmd is not None:               # 「やっほーエージェント」検出
-                awake_until = now + AWAKE_WINDOW
-                if not wake_cmd:                   # 呼びかけのみ → 返事して次の発話を待つ
-                    print(f"\nあなた: {text}  〔起動〕", flush=True)
-                    speak_mod.speak("はい、マスター？", block=True)
+            if mode == "ptt":
+                # PTT：右Ctrlを押している間だけ録音。環境音を拾わないのでウェイクワード不要。
+                audio = _record_while_held(mic, ptt_vk)
+                if audio is None:
                     continue
-                text = wake_cmd                    # ウェイク以降をコマンドとして実行
-            elif now < awake_until:                # 起動中ウィンドウ → 呼びかけ不要で連続会話
-                text = _norm(text)
-            else:                                  # 待機中 → 無視（誤爆防止の核）
-                print("   （待機中：ウェイクワード『エージェント』が無いので無視）", flush=True)
-                continue
+                text = _transcribe(model, audio, vocab_hint)
+                if not text or _is_noise(text):
+                    continue
+            else:
+                print("🎤 …", end="\r", flush=True)
+                _flush_mic()  # 直前の読み上げ中に溜まった音（自分の声）を捨ててから聞く
+                audio = _record_utterance(mic)
+                if audio is None:
+                    continue
+                text = _transcribe(model, audio, vocab_hint)
+                if not text or _is_noise(text):
+                    if text:
+                        print(f"🔉 聞こえた（雑音扱いで無視）: 「{text}」", flush=True)
+                    continue
+                print(f"🔉 聞こえた: 「{text}」", flush=True)  # 認識した全発話を表示（デバッグ）
+
+                # ウェイクワードのゲート（ADR-0038）。ウェイクワードを含まない発話（ゲーム中の声・
+                # 通話・独り言）は完全に無視する＝誤爆しない。
+                now = time.time()
+                wake_cmd = _find_wake(text)
+                if wake_cmd is not None:               # 「やっほーエージェント」検出
+                    awake_until = now + AWAKE_WINDOW
+                    if not wake_cmd:                   # 呼びかけのみ → 返事して次の発話を待つ
+                        print(f"\nあなた: {text}  〔起動〕", flush=True)
+                        speak_mod.speak("はい、マスター？", block=True)
+                        continue
+                    text = wake_cmd                    # ウェイク以降をコマンドとして実行
+                elif now < awake_until:                # 起動中ウィンドウ → 呼びかけ不要で連続会話
+                    text = _norm(text)
+                else:                                  # 待機中 → 無視（誤爆防止の核）
+                    print("   （待機中：ウェイクワード『エージェント』が無いので無視）", flush=True)
+                    continue
             print(f"\nあなた: {text}", flush=True)
 
             stripped = text.strip("。、！!？? 　")
