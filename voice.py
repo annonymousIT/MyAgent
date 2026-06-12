@@ -250,14 +250,24 @@ def _is_noise(text: str) -> bool:
 
 
 def _add_cuda_dll_dirs() -> None:
-    """faster-whisper(GPU) が要る cuBLAS/cuDNN の DLL（nvidia の pip パッケージ同梱）を検索パスへ。"""
+    """faster-whisper(GPU) が要る cuBLAS/cuDNN の DLL を検索パスへ。
+
+    探す場所（見つかった所を全部追加）:
+    1. MyAgent/cuda/      … 手動で DLL を置く場所（一番簡単な導入経路）
+    2. CUDA Toolkit の標準インストール先 bin
+    3. pip の nvidia パッケージ（Linux 用のことが多いが念のため）
+    """
     import glob
-    site = Path(__file__).parent / ".venv" / "Lib" / "site-packages" / "nvidia"
-    for d in glob.glob(str(site / "*" / "bin")):
-        try:
-            os.add_dll_directory(d)
-        except Exception:
-            pass
+    base = Path(__file__).parent
+    cands = [str(base / "cuda")]
+    cands += glob.glob(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12*\bin")
+    cands += glob.glob(str(base / ".venv" / "Lib" / "site-packages" / "nvidia" / "*" / "bin"))
+    for d in cands:
+        if Path(d).is_dir():
+            try:
+                os.add_dll_directory(d)
+            except Exception:
+                pass
 
 
 def _load_whisper():

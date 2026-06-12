@@ -29,3 +29,6 @@ settings.json
 
 # orbâ‡”voice ã®çŠ¶æ…‹é€£æºãƒ•ã‚¡ã‚¤ãƒ«ï¼ˆå®Ÿè¡Œæ™‚ç”Ÿæˆï¼‰
 orb_state.txt
+
+# Whisper GPU—p DLLiè“®”z’uE”z•z‚µ‚È‚¢j
+cuda/
