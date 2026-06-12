@@ -3,6 +3,7 @@ truststore
 icalendar
 recurring_ical_events
 faster-whisper
+noisereduce  # マイク録音のノイズ抑制（spectral gating）
 sounddevice
 webrtcvad-wheels  # webrtcvad のプリビルト版（Windows でも C コンパイラ不要で入る・import名は webrtcvad）
 numpy

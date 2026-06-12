@@ -21,6 +21,7 @@ DEFAULTS = {
     "orb_theme": "moonlight",     # orb の配色（moonlight / amethyst / mist / ember）
     "input_mode": "ptt",          # 入力方式 ptt（押してる間録音）/ wake（ウェイクワード）
     "ptt_key": 163,               # PTT キーの仮想キーコード（既定 163=右Ctrl/VK_RCONTROL）
+    "noise_reduction": True,      # 録音のノイズ抑制（ファン/ホワイトノイズに有効）
 }
 
 

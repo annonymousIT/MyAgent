@@ -188,8 +188,22 @@ def _build_vocab_hint() -> str:
     return "、".join(seen[:48])
 
 
+# ノイズ抑制（noisereduce）。設定 noise_reduction が真の時だけ、録音をWhisperに渡す前に
+# 定常ノイズ（ファン/ホワイトノイズ/低音うなり）を spectral gating で減らす。音楽など非定常な音には
+# 効きが限定的（その場合の本命は『ヘッドホン使用』）。失敗時は素の音をそのまま使う＝壊さない。
+def _denoise(audio_f32: "np.ndarray") -> "np.ndarray":
+    try:
+        import settings
+        if not settings.load().get("noise_reduction", True):
+            return audio_f32
+        import noisereduce as nr
+        return nr.reduce_noise(y=audio_f32, sr=SAMPLE_RATE, stationary=False).astype(np.float32)
+    except Exception:
+        return audio_f32
+
+
 def _transcribe(model, audio_i16: "np.ndarray", hint: str = "") -> str:
-    audio = audio_i16.astype(np.float32) / 32768.0
+    audio = _denoise(audio_i16.astype(np.float32) / 32768.0)
     # beam_size=5 で精度優先、initial_prompt で語彙を寄せる（短い命令の取り違えを減らす）。
     segs, _ = model.transcribe(audio, language="ja", beam_size=5, initial_prompt=hint or None)
     return "".join(s.text for s in segs).strip()

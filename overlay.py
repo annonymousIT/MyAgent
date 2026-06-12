@@ -250,10 +250,13 @@ class Orb:
         ttk.Label(win, text="マスター専属PCパートナーの設定", foreground="#666").grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
-        # 音声 ON/OFF
+        # 音声 ON/OFF ＋ ノイズ抑制
         voice_var = tk.BooleanVar(value=bool(cfg.get("voice_enabled", True)))
         ttk.Checkbutton(win, text="声を出す", variable=voice_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=4)
+            row=2, column=0, sticky="w", pady=4)
+        nr_var = tk.BooleanVar(value=bool(cfg.get("noise_reduction", True)))
+        ttk.Checkbutton(win, text="ノイズ抑制", variable=nr_var).grid(
+            row=2, column=1, sticky="w", pady=4)
 
         # 声の種類
         ttk.Label(win, text="声（VOICEVOX）").grid(row=3, column=0, sticky="w", pady=4)
@@ -301,6 +304,7 @@ class Orb:
                 "voicevox_speed": round(speed_var.get(), 2),
                 "orb_theme": ja2key.get(theme_var.get(), "moonlight"),
                 "input_mode": modeja2key.get(mode_var.get(), "ptt"),
+                "noise_reduction": nr_var.get(),
             }
 
         def _apply_theme() -> None:
