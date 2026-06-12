@@ -27,7 +27,22 @@
     "電話": "Discord",
     "通話": "Discord",
     "でぃす": "Discord",
-    "ぶいすこ": "Visual Studio Code"
+    "ディスコード": "Discord",
+    "でぃすこーど": "Discord",
+    "ぶいすこ": "Visual Studio Code",
+    "ユーチューブ": "YouTube",
+    "ようつべ": "YouTube",
+    "アプリミュージック": "Apple Music",
+    "クローム": "Google Chrome",
+    "エッジ": "Microsoft Edge",
+    "ライン": "LINE",
+    "らいん": "LINE",
+    "ノーション": "Notion",
+    "のーしょん": "Notion",
+    "チームス": "Microsoft Teams",
+    "スティーム": "Steam",
+    "すちーむ": "Steam",
+    "げんしん": "原神"
   },
   "system": {
     "音量下げる": "osascript -e 'set volume output volume 25'",

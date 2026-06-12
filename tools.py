@@ -174,6 +174,29 @@ def _resolve_entry(apps: dict, name: str):
     return None
 
 
+def _resolve_name(apps: dict, name: str) -> "str | None":
+    """name（表示名 or エイリアス）から apps の正準名（キー、例 'Spotify'）を返す。
+
+    _resolve_entry は値(dict)だけ返し正準名（キー）を落とすため、別名「スポティファイ」で引くと
+    英語の窓タイトル「Spotify Premium」を探せなかった。窓の最小化/閉じる/配置の対象探索に正準名を
+    候補として足すための関数（解決順は _resolve_entry と同じ）。
+    """
+    target = _nfc(name)
+    lower = target.lower()
+    for key in apps:
+        if _nfc(key) == target:
+            return key
+    for key, entry in apps.items():
+        if isinstance(entry, dict) and any(_nfc(a) == target for a in (entry.get("aliases") or [])):
+            return key
+    for key, entry in apps.items():
+        if _nfc(key).lower() == lower:
+            return key
+        if isinstance(entry, dict) and any(_nfc(a).lower() == lower for a in (entry.get("aliases") or [])):
+            return key
+    return None
+
+
 def _resolve_app(apps: dict, name: str) -> "str | None":
     """name から open -a / 起動 用の target 文字列を解決する（_resolve_entry の薄いラッパ）。"""
     return _app_target(_resolve_entry(apps, name))
@@ -294,7 +317,9 @@ def run_system(name: str, confirmed: bool = False) -> str:
     （旧実装の input() は音声モードでコンソール入力待ちになりフリーズ同然だった＝廃止）。
     既定の語彙に無い名前は、後方互換で config の system / dangerous_system 文字列を試す。
     """
-    action = _SYSTEM_ALIASES.get(name.strip()) if name else None
+    # 日本語の言い回し（キー）でも、正準アクション名（値・例 volume_up＝高速パスが渡す）でも受ける。
+    s = name.strip() if name else ""
+    action = _SYSTEM_ALIASES.get(s) or (s if s in set(_SYSTEM_ALIASES.values()) else None)
 
     if action:
         if action in _DANGEROUS_ACTIONS and not confirmed:
@@ -677,39 +702,47 @@ def _manage_window_win(action: str, app: str = "", monitor: str = "") -> str:
     import win_ops
     raw = (action or "").strip()
     act = _WINDOW_ACTIONS.get(raw, raw.lower())
-    act = act if act in ("left", "right", "maximize", "center", "list") else raw.lower()
+    _PLACE = ("left", "right", "maximize", "center")            # 座標配置系
+    if act not in (*_PLACE, "minimize", "restore", "list"):
+        act = raw.lower()
     if act == "list":
         return "、".join(running_apps()) or "(起動中のアプリは把握できませんでした)"
-    if act not in ("left", "right", "maximize", "center"):
-        return "未対応の操作です（left / right / maximize / center / list）。"
+    if act not in (*_PLACE, "minimize", "restore"):
+        return "未対応の操作です（left / right / maximize / center / minimize / restore / list）。"
 
     # 対象窓は「タイトル候補」で探す（exeはランチャー/UWPで当たらないため・close と同じ方式）。
     exe = ""
     titles = None
     if app and app.strip():
-        entry = _resolve_entry(load_config().get("apps", {}), app)
+        apps = load_config().get("apps", {})
+        entry = _resolve_entry(apps, app)
         exe = entry.get("exe", "") if isinstance(entry, dict) else ""
-        titles = [app.strip()]
+        # 入力語＋正準名（キー・例 Spotify＝窓タイトルに出る英名）＋別名＋exe名 を候補に。
+        titles = [app.strip(), _resolve_name(apps, app) or ""]
         if isinstance(entry, dict):
-            titles.append(entry.get("name", ""))
             titles += entry.get("aliases", []) or []
             titles.append(Path(entry.get("exe", "")).stem)
         titles = [t for t in titles if t]
 
-    label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
-    where = {"left": "左の画面の", "right": "右の画面の"}.get((monitor or "").strip().lower(), "")
-
     ok, msg = win_ops.manage_window(act, exe, monitor, titles=titles)
-    if not ok and app and app.strip():     # 窓が無い→起動してから一度だけ再配置（自己修復）
+    # 自己修復は配置系のみ（最小化/復元は、無い窓を起動してまでやらない）。
+    if not ok and act in _PLACE and app and app.strip():
         launch_app(app)
         time.sleep(1.6)
         ok, msg = win_ops.manage_window(act, exe, monitor, titles=titles)
 
+    who = app.strip() if (app and app.strip()) else "最前面のウィンドウ"
     if ok:
-        who = app.strip() if (app and app.strip()) else "最前面のウィンドウ"
+        if act == "minimize":
+            return f"{who} を最小化しました。"
+        if act == "restore":
+            return f"{who} を元に戻しました。"
+        label = {"left": "左半分", "right": "右半分", "maximize": "最大化", "center": "中央"}[act]
+        where = {"left": "左の画面の", "right": "右の画面の"}.get((monitor or "").strip().lower(), "")
         return f"{who} を{where}{label}に配置しました。"
     # 失敗は正直に。LLM が成功と捏造しないよう明示する。
-    return (f"（未配置・失敗）{app or '対象'} のウィンドウが見つかりませんでした（{msg}）。"
+    verb = {"minimize": "最小化", "restore": "復元"}.get(act, "配置")
+    return (f"（未{verb}・失敗）{app or '対象'} のウィンドウが見つかりませんでした（{msg}）。"
             "成功したと言わず、ユーザーに開いているか確認してください。")
 
 
@@ -811,12 +844,12 @@ def _close_app_win(name: str = "") -> str:
     if not target_name:
         return "何を閉じますか？（アプリ名やサイト名を教えてください）"
     cfg = load_config()
-    entry = _resolve_entry(cfg.get("apps", {}), target_name)
+    apps = cfg.get("apps", {})
+    entry = _resolve_entry(apps, target_name)
 
-    # ① タイトル一致のウィンドウを閉じる（種類問わず）。候補＝入力語・表示名・英名・エイリアス・サイト名。
-    cands = [target_name]
+    # ① タイトル一致のウィンドウを閉じる（種類問わず）。候補＝入力語・正準名(英名)・exe名・エイリアス・サイト名。
+    cands = [target_name, _resolve_name(apps, target_name) or ""]
     if isinstance(entry, dict):
-        cands.append(entry.get("name", ""))
         cands.append(Path(entry.get("exe", "")).stem)
         cands += entry.get("aliases", []) or []
     sites = cfg.get("sites", {})
@@ -1073,16 +1106,15 @@ TOOL_DEFS = [
     },
     {
         "name": "run_system",
-        "description": "Run a system action (volume/display/lock/media/sleep...). Dangerous ones (sleep/"
-                       "restart/shutdown) return a confirmation request first; after the user clearly "
-                       "agrees, call again with confirmed=true.",
+        "description": "System action (volume/display/lock/media/sleep). Dangerous (sleep/restart/shutdown) "
+                       "return a confirm request; after the user agrees, call again with confirmed=true.",
         "input_schema": {"type": "object",
                          "properties": {"name": {"type": "string"}, "confirmed": {"type": "boolean"}},
                          "required": ["name"]},
     },
     {
         "name": "web_search",
-        "description": "Open web search results for info not in registered sites/apps (weather/stocks/news/lookups). Never invent answers. query = search terms.",
+        "description": "Web search for info not in registered sites/apps (stocks/news/facts). Never invent. query = terms.",
         "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     },
     {
@@ -1092,7 +1124,7 @@ TOOL_DEFS = [
     },
     {
         "name": "get_weather",
-        "description": "Get real weather (current + forecast) for any weather/temp/rain question. location = place name; map words like 大学/学校 via the profile place table; empty = default place.",
+        "description": "Real weather (current+forecast) for any weather/temp/rain question. location = place name (empty = default).",
         "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
     },
     {
@@ -1111,12 +1143,13 @@ TOOL_DEFS = [
     },
     {
         "name": "manage_window",
-        "description": "Tile/place a window. app empty = frontmost. monitor: which screen (left/right/number, "
-                       "empty = current). Usage rules are in the system prompt.",
+        "description": "Tile/place/minimize/restore a window. app empty = frontmost. monitor: which screen "
+                       "(left/right/number, empty = current). minimize=しまう, restore=最小化から出す. Rules in system prompt.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["left", "right", "maximize", "center", "list"]},
+                "action": {"type": "string",
+                           "enum": ["left", "right", "maximize", "center", "minimize", "restore", "list"]},
                 "app": {"type": "string"},
                 "monitor": {"type": "string"},
             },
@@ -1125,7 +1158,7 @@ TOOL_DEFS = [
     },
     {
         "name": "remember",
-        "description": "Persistently remember a fact about the user. fact = a self-contained sentence. Use add_schedule (not this) for anything with a weekday/date.",
+        "description": "Persist a fact about the user. fact = self-contained sentence. For weekday/date events use add_schedule instead.",
         "input_schema": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]},
     },
     {

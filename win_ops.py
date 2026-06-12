@@ -27,6 +27,10 @@ if IS_WINDOWS:
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.IsIconic.argtypes = [wintypes.HWND]            # 最小化判定（▽タグ）。restype は既定c_intでBOOL可
+    user32.IsIconic.restype = wintypes.BOOL
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]  # restore で前面化（「出して」）
+    user32.SetForegroundWindow.restype = wintypes.BOOL
     user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.MoveWindow.argtypes = [
         wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.BOOL
@@ -40,6 +44,7 @@ if IS_WINDOWS:
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
 SW_MAXIMIZE = 3
+SW_MINIMIZE = 6
 SW_RESTORE = 9
 SPI_GETWORKAREA = 0x0030
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -124,32 +129,45 @@ def close_window_by_title(cands: "list[str]") -> bool:
     cl = [c.lower() for c in cands if c and len(c) >= 2]
     if not cl:
         return False
-    wants_browser = any(b in c for c in cl for b in ("chrome", "edge", "firefox", "brave", "opera"))
-    hits: "list[int]" = []
 
-    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def _cb(hwnd, _lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        n = user32.GetWindowTextLengthW(hwnd)
-        if n == 0:
-            return True
-        buf = ctypes.create_unicode_buffer(n + 1)
-        user32.GetWindowTextW(hwnd, buf, n + 1)
-        title = buf.value.lower()
-        if not wants_browser and title.endswith(_BROWSER_SUFFIX):
-            return True  # ブラウザ本体は巻き込まない（PWA独立窓は接尾辞が付かないので対象に残る）
-        if any(c in title for c in cl):
-            hits.append(hwnd)
-        return True
+    def _scan() -> "list[int]":
+        """タイトルに候補語を含む対象窓を列挙（ブラウザ本体は除外）。"""
+        wants_browser = any(b in c for c in cl for b in ("chrome", "edge", "firefox", "brave", "opera"))
+        hits: "list[int]" = []
 
-    user32.EnumWindows(_cb, 0)
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _cb(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n == 0:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            title = buf.value.lower()
+            if not wants_browser and title.endswith(_BROWSER_SUFFIX):
+                return True  # ブラウザ本体は巻き込まない（PWA独立窓は接尾辞が付かないので対象に残る）
+            if any(c in title for c in cl):
+                hits.append(hwnd)
+            return True
+
+        user32.EnumWindows(_cb, 0)
+        return hits
+
+    hits = _scan()
     if not hits:
         return False
+    # WM_CLOSE は PostMessage（非同期）。投げただけで成功を断定せず、実際に消えたか確認する。
+    # 残れば（保存ダイアログ・PWAが無視等）もう一度投げ、それでも残れば False＝呼び出し側が正直に報告/taskkill。
     WM_CLOSE = 0x0010
     for h in hits:
         user32.PostMessageW(h, WM_CLOSE, 0, 0)
-    return True
+    time.sleep(0.4)
+    if _scan():
+        for h in _scan():
+            user32.PostMessageW(h, WM_CLOSE, 0, 0)
+        time.sleep(0.5)
+    return not _scan()  # 対象窓が全部消えた時だけ True
 
 
 # --------------------------------------------------------------------------
@@ -355,11 +373,36 @@ def manage_window(action: str, exe: str = "", monitor: str = "", titles=None) ->
         if not hwnd:
             return False, "前面のウィンドウが取得できませんでした。"
     try:
+        # 最小化／復元は座標計算が不要（しまう・出すだけ）。配置系（left/right/maximize/center）より先に処理。
+        if action == "minimize":
+            user32.ShowWindow(hwnd, SW_MINIMIZE)
+            return True, "ok"
+        if action == "restore":
+            user32.ShowWindow(hwnd, SW_RESTORE)   # 最小化/最大化どちらからも元のサイズへ
+            user32.SetForegroundWindow(hwnd)      # 前面へ（「出して」=見える状態に）
+            return True, "ok"
         rect, true_max = _target_rect(monitor)
         _place(hwnd, action, rect, true_max)
+        # モニタ指定時は「載ったつもり」で終わらせない：実際にそのモニタへ移ったか確認し、
+        # 外れていたら一度だけやり直す（Chrome/最大化窓が MoveWindow を無視して元画面に残る事故対策）。
+        if monitor and not _window_on_rect(hwnd, rect):
+            time.sleep(0.25)
+            _place(hwnd, action, rect, true_max)
+            if not _window_on_rect(hwnd, rect):
+                return False, "指定モニタへ移動できませんでした（ウィンドウが追従しません）。"
         return True, "ok"
     except Exception as e:  # ctypes 例外でも本体を止めない
         return False, f"{type(e).__name__}: {e}"
+
+
+def _window_on_rect(hwnd: int, rect: tuple) -> bool:
+    """ウィンドウの中心が rect（配置先モニタの作業領域 x,y,w,h）に入っているか＝そのモニタに載ったか。"""
+    x, y, w, h = rect
+    r = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return True  # 取得不能なら判定を諦めて成功扱い（誤った失敗報告を避ける）
+    cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+    return x <= cx <= x + w and y <= cy <= y + h
 
 
 def monitor_count() -> int:
@@ -411,6 +454,8 @@ def windows_overview(max_n: int = 12, title_len: int = 20) -> "list[tuple[int, s
             except ValueError:
                 idx = 1
         t = title if len(title) <= title_len else title[:title_len] + "…"
+        if user32.IsIconic(hwnd):   # 最小化中は頭に▽（LLMが「出して/再配置」を判断できるよう・凡例は静的側）
+            t = "▽" + t
         out.append((idx, t))
         return True
 

@@ -23,6 +23,7 @@ Thumbs.db
 
 # 実測コストログ（ローカル記録）
 costs.jsonl
+cost_calls.jsonl
 
 # ユーザー設定（声など・マシン固有）
 settings.json
@@ -30,5 +31,5 @@ settings.json
 # orb⇔voice の状態連携ファイル（実行時生成）
 orb_state.txt
 
-# Whisper GPU�p DLL�i�蓮�z�u�E�z�z���Ȃ��j
+# Whisper GPU�p DLL�i�蓮�z�u�E�z�z���Ȃ��j
 cuda/

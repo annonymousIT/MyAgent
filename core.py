@@ -11,7 +11,17 @@ import datetime
 import json
 import os
 import re
+import sys
 from pathlib import Path
+
+# Windows の新コンソール（overlay が CREATE_NEW_CONSOLE で起動）は cp932 のことがあり、絵文字や
+# ¥ を含む print が UnicodeEncodeError で即クラッシュ→プロセスが起動しない事故になる。core は
+# 全エントリポイント(agent/web/overlay/voice)が import するので、ここで一度だけ標準出力を UTF-8 に固定。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # 企業/学校などTLS傍受プロキシ下でも、Python が OS の証明書ストア（Windowsの信頼ストア等）を
 # 使えるようにする。これが無いと certifi 同梱CAにプロキシのCAが無く SSL 検証に失敗する。
@@ -97,53 +107,41 @@ def static_menu() -> str:
     system = "、".join(list(cfg.get("system", {}).keys()) + list(cfg.get("dangerous_system", {}).keys()))
     return (
         "[Capabilities]\n"
-        "- If a name is both a site and an app, prefer the app (dedicated window).\n"
-        "- If intent maps to a registered op, do it; if ambiguous between several, ask one short question.\n"
-        "- Deliver real info: weather/temp/rain -> get_weather; article/page content -> fetch_page; "
-        "other lookups (stocks/news/facts) or 調べて/教えて -> web_search/open_url. Never invent; cite the fetched data.\n"
-        "- Media (動画見たい/流して/聴きたい) -> play_media (stays open). Close (閉じて/消して/やめて) -> close_app "
-        "(never confuse with system ops like モニタ消す; if context says an app was just opened, close that one).\n"
-        "- Window (左/右/最大化/中央) -> manage_window. For requests like 'A左、B右', launch any missing app first, "
-        "then place both — complete launch+placement in one turn.\n"
-        "- Multi-monitor: words like 画面/モニタ/スクリーン (左の画面/右のモニタ/2番目の画面) set manage_window's "
-        "'monitor' (left/right/number); 半分や左右寄せ such as 左半分 set 'action'. '左の画面にDiscord' = "
-        "manage_window(action=maximize, app=Discord, monitor=left). '右画面の左半分にChrome' = "
-        "manage_window(action=left, app=Chrome, monitor=right). With one monitor, ignore monitor.\n"
-        "- Context data each turn: [Monitors]=screen count (1 → ignore monitor arg). [Running apps]=open now; "
-        "not listed = closed, but Chrome PWAs don't appear — if unsure just launch_app (idempotent, only brings "
-        "to front). [Windows now]=which window sits on which screen (mon1=left..) — use it for 整理して/並べ直して "
-        "requests: decide a sensible layout yourself and place each window with manage_window.\n"
-        "- Remember/schedule/forget per the hard rules above.\n"
-        "- Pure greetings/small talk (おはよ etc.): no tools; reply in character, weaving in a caring note from "
-        "memory or upcoming schedule when natural.\n"
-        "- If an utterance implies an action (友達と通話する -> open the call app), act on it; don't just chat.\n"
-        "- Never paste raw tool-result strings into the reply; always rephrase in your own voice. "
-        "If a tool fails, say so honestly, in character.\n"
-        "- Only what is truly impossible on this PC gets an honest 'can't do' (e.g. air conditioners, physical objects).\n"
-        "- Multi-step example: 'Discordを左、moodleを右' -> launch_app(Discord), launch_app(moodle+R), "
-        "manage_window(left, Discord), manage_window(right, moodle+R), then one short in-character summary.\n"
-        "- Ambiguous media like あれ流して with no prior context: ask what to play instead of guessing. "
-        "With context (e.g. a song was just discussed), play that.\n"
-        "- Weather replies: summarize the fetched data concretely (sky, temp, rain chance, advice like 傘) "
-        "and tie it to the user's schedule when relevant; never pad with invented numbers.\n"
-        "- Dangerous system ops (再起動/寝る etc.) always need explicit confirmation first; "
-        "closing the user's own windows with unsaved work also deserves a quick check.\n"
-        "- When asked 何ができるの, give a short in-character tour of capabilities (apps, sites, system, "
-        "window tiling, weather/web lookups, memory & schedule), not a raw list dump.\n"
-        "- ただいま (coming home): greet warmly in character, then report anything left on today's schedule "
-        "and one caring note (e.g. tomorrow's first event). おやすみ: short good-night + a nudge about "
-        "tomorrow's earliest plan. いってきます: send-off + relevant weather/umbrella note if known.\n"
-        "- Tone calibration: scolding is a pinch of spice, not every line — at most one small jab per reply, "
-        "then genuine support. When Master reports effort or success (課題終わった etc.), drop the jab and "
-        "praise honestly first. Vary phrasing; avoid repeating the same nag twice in a row.\n"
-        "- Keep replies 1-2 sentences for actions; up to 3 short sentences when weaving weather+schedule. "
-        "No bullet lists or markdown in replies — natural speech only (it may be read aloud by TTS).\n"
+        "- Name is both site and app -> prefer app (own window).\n"
+        "- Intent maps to a registered op -> do it; ambiguous between several -> one short question.\n"
+        "- Real info: weather/temp/rain -> get_weather; article/page -> fetch_page; other lookups "
+        "(stocks/news/facts) or 調べて/教えて -> web_search/open_url. Never invent; cite fetched data.\n"
+        "- Media (動画見たい/流して/聴きたい) -> play_media (stays open).\n"
+        "- Quit vs minimize: 終了/落として/もう閉じて (done with it) -> close_app (kills the app); "
+        "しまって/どけて/隠して/最小化 (keep running, just hide) -> manage_window(minimize); 出して/戻して/呼び戻して "
+        "(un-minimize) -> manage_window(restore). Plain 閉じて is usually close_app, but if it's clearly 'get it out of "
+        "the way' lean minimize. close_app not for system ops like モニタ消す; if an app was just opened, close that one.\n"
+        "- Window (左/右/最大化/中央/最小化/復元) -> manage_window. 'A左、B右' -> launch any missing app first, then place both, in one turn.\n"
+        "- Multi-monitor: 画面/モニタ/スクリーン (左の画面/右のモニタ/2番目) -> 'monitor' (left/right/number); "
+        "半分/左右寄せ (左半分) -> 'action'. e.g. '右画面の左半分にChrome' = manage_window(action=left, app=Chrome, monitor=right). "
+        "One monitor -> ignore monitor.\n"
+        "- Context each turn: [Monitors]=screen count (1 -> ignore monitor). [Running apps]=open now; not listed=closed, "
+        "but Chrome PWAs don't show -> if unsure just launch_app (idempotent). [Windows now]=window-to-screen map "
+        "(mon1=left; ▽title=minimized -> use manage_window(restore) or place it to bring back); "
+        "use for 整理して/並べ直して: pick a sensible layout and place each with manage_window.\n"
+        "- Greetings/small talk (おはよ): no tools; reply in character with a caring note from memory/schedule when natural.\n"
+        "- Utterance implying action (友達と通話する -> open call app): act, don't just chat.\n"
+        "- Never paste raw tool-result strings; rephrase in your voice. Tool fails -> say so honestly, in character.\n"
+        "- Only truly impossible things on this PC get an honest 'can't do' (air conditioners, physical objects).\n"
+        "- Ambiguous media (あれ流して, no context): ask what to play; with context (a song just discussed), play that.\n"
+        "- Weather replies: concrete summary of fetched data (sky, temp, rain%, 傘 advice), tie to schedule when relevant; no invented numbers.\n"
+        "- Dangerous system ops (再起動/寝る) need explicit confirm first; closing user's windows with unsaved work also deserves a check.\n"
+        "- 何ができるの -> short in-character tour (apps, sites, system, window tiling, weather/web, memory & schedule), not a list dump.\n"
+        "- ただいま: warm greeting + what's left on today's schedule + one caring note (tomorrow's first event). "
+        "おやすみ: good-night + nudge about tomorrow's earliest plan. いってきます: send-off + weather/umbrella note if known.\n"
+        "- Tone: scolding is a pinch of spice — at most one small jab per reply, then genuine support. On reported effort/success "
+        "(課題終わった) drop the jab, praise first. Vary phrasing; don't repeat the same nag twice.\n"
+        "- Replies 1-2 sentences for actions, up to 3 short when weaving weather+schedule. No bullets/markdown — natural speech (TTS).\n"
         f"- open_site names: {sites}\n"
-        "- launch_app: pass the app name as the user said it (Japanese reading, nickname, or English). "
-        "The resolver matches ANY installed app by name/alias/reading, so you can open apps beyond the "
-        "examples here — just try it; it honestly returns not-found if truly absent. Don't refuse before trying. "
+        "- launch_app: pass the app name as the user said it (reading/nickname/English). Resolver matches ANY installed app by "
+        "name/alias/reading, so apps beyond these examples work — just try it; returns not-found if truly absent. Don't refuse before trying. "
         f"Common installed apps: {apps}\n"
-        f"- run_system names (and you may also: ロック/スクリーンショット/再生/一時停止/次の曲/前の曲): {system}"
+        f"- run_system names (also: ロック/スクリーンショット/再生/一時停止/次の曲/前の曲): {system}"
     )
 
 
@@ -171,6 +169,17 @@ _RULES = (
 )
 
 
+# キャッシュTTL。既定 5m。
+# 当初1hにしたが実測で「毎ターン ~1400tok の書込が発生」と判明（cw>0が全ターン）。1hは書込が
+# 1.25x→2.0xに上がるため、この毎ターン書込が純粋に高くつく。実測の間隔分布(5分以内32/39)と合わせ
+# 計算すると、5分の方が安い（毎ターン書込税 > 稀なギャップ冷書込）。env MYAGENT_CACHE_TTL=1h で戻せる。
+_CACHE_TTL = os.environ.get("MYAGENT_CACHE_TTL", "5m")  # "5m" / "1h"
+_CACHE_CTL = {"type": "ephemeral", "ttl": "1h"} if _CACHE_TTL in ("1h", "1hr", "60m") else {"type": "ephemeral"}
+
+# 診断用：API呼び出し1回ごとの cw/cr/in/out を cost_calls.jsonl に残す（どの呼び出しが書込を出すか特定）。
+_DEBUG_CALLS = os.environ.get("MYAGENT_DEBUG_CALLS", "1") not in ("0", "false", "")
+
+
 def build_system_prompt(persona: str):
     """System prompt as 2 blocks for prompt caching (コスト最適化):
     - stable block (rules + persona + static menu) carries cache_control -> also caches
@@ -179,7 +188,7 @@ def build_system_prompt(persona: str):
     """
     stable = _RULES + "\n\n" + persona + "\n\n" + static_menu()
     return [
-        {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": stable, "cache_control": _CACHE_CTL},
         {"type": "text", "text": volatile_context()},
     ]
 
@@ -188,7 +197,9 @@ MAX_HISTORY_MESSAGES = 6  # 直近3往復（コスト最適化で10→6。古い
 MAX_TOOL_ROUNDS = 5  # 「起動→配置」など複数ステップを許す。暴走防止に上限を設ける
 
 # 料金（claude-haiku-4-5・$/MTok）と円換算。実測コストメーターの基礎（ADR-0033）。
-_PRICE = {"in": 1.00, "out": 5.00, "cw": 1.25, "cr": 0.10}  # 入力/出力/キャッシュ書込1.25x/読出0.1x
+# キャッシュ書込は 5分TTL=1.25x / 1時間TTL=2.0x。読出は両方 0.1x。_CACHE_TTL に合わせる。
+_CW_MULT = 2.00 if _CACHE_CTL.get("ttl") == "1h" else 1.25
+_PRICE = {"in": 1.00, "out": 5.00, "cw": _CW_MULT, "cr": 0.10}  # 入力/出力/キャッシュ書込/読出（×base $1）
 JPY_PER_USD = float(os.environ.get("JPY_PER_USD", "155"))
 
 
@@ -248,9 +259,12 @@ def _log_cost(usage: dict) -> dict:
     """
     now = datetime.datetime.now()
     yen = float(usage.get("yen", 0) or 0)
+    # cw/cr/in/out も残す（ターンまたぎでキャッシュが効いているかの検証用。cr>0=温・cw>0=冷書込）。
     with open(COSTS_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": now.isoformat(timespec="seconds"),
-                            "yen": yen, "calls": usage.get("calls", 0)}) + "\n")
+                            "yen": yen, "calls": usage.get("calls", 0),
+                            "in": usage.get("in", 0), "out": usage.get("out", 0),
+                            "cw": usage.get("cw", 0), "cr": usage.get("cr", 0)}) + "\n")
     today = 0.0
     d_pref = now.strftime("%Y-%m-%d")
     if COSTS_PATH.exists():
@@ -306,13 +320,26 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
     # 今ターンの実測使用量（全API呼び出し合算：ループ＋ガード＋言い換え）→ _finishで円換算
     usage = {"in": 0, "out": 0, "cw": 0, "cr": 0, "calls": 0}
 
-    def _acc(resp) -> None:
+    def _acc(resp, tag: str = "") -> None:
         u = resp.usage
-        usage["in"] += u.input_tokens
-        usage["out"] += u.output_tokens
-        usage["cw"] += getattr(u, "cache_creation_input_tokens", 0) or 0
-        usage["cr"] += getattr(u, "cache_read_input_tokens", 0) or 0
+        ci = u.input_tokens
+        co = u.output_tokens
+        ccw = getattr(u, "cache_creation_input_tokens", 0) or 0
+        ccr = getattr(u, "cache_read_input_tokens", 0) or 0
+        usage["in"] += ci
+        usage["out"] += co
+        usage["cw"] += ccw
+        usage["cr"] += ccr
         usage["calls"] += 1
+        # 診断：どの呼び出しが cw を出しているか特定するため、呼び出し単位で内訳を残す（MYAGENT_DEBUG_CALLS=0で無効）。
+        if _DEBUG_CALLS and not dry_run:
+            try:
+                with open(BASE / "cost_calls.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                                        "call": usage["calls"], "tag": tag,
+                                        "in": ci, "out": co, "cw": ccw, "cr": ccr}) + "\n")
+            except Exception:
+                pass
 
     # ストリーミング発声（#34）。最終応答を文単位で on_sentence へ流す。
     streamed = {"text": "", "first_done": False}  # 発声済み本文＋最初のチャンクを出したか
@@ -364,10 +391,10 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
                     streamed["text"] += last
                     on_sentence(last)
                 msg = stream.get_final_message()
-            _acc(msg)
+            _acc(msg, "loop")
             return msg
         r = client.messages.create(**kw)
-        _acc(r)
+        _acc(r, "loop")
         return r
 
     def _force_save(claim_reply: str) -> "str | None":
@@ -381,7 +408,7 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
         try:
             r = client.messages.create(model=MODEL, max_tokens=300, system=system_prompt,
                                        tools=tools.TOOL_DEFS, tool_choice={"type": "any"}, messages=msgs)
-            _acc(r)
+            _acc(r, "force_save")
         except Exception:
             return None
         saved = None
@@ -409,15 +436,19 @@ def run_turn(client, persona: str, user_input: str, dry_run: bool = False, histo
                      "事実は変えずに、これをあなたの口調・人格でマスターへ一言だけ伝えてください。"},
                 ],
             )
-            _acc(r)
+            _acc(r, "rephrase")
             t = _text_of(r)
             return t if t != "（…）" else result
         except Exception:
             return result
 
     def _finish(reply: str) -> dict:
-        if reply == "（…）" and actions:  # ツール実行後にモデルが無言だった時の保険
-            # 実モードは素のツール結果でなく人格で言い換える（dry_runは検証用に素のまま）
+        # モデルがツール呼び出しと同じ往復で既に本文を narration している場合（call1で「電卓開くね」等を
+        # 喋り、その後の往復が無言=out2になる）、それを返答に採用して _rephrase の別API（cr4534+inを丸ごと
+        # 再課金。実測で全ツールターンの4〜5割に発生）を省く。声モードでは既に発声済みなので二度喋りも防ぐ。
+        if reply == "（…）" and streamed["text"].strip():
+            reply = streamed["text"].strip()
+        if reply == "（…）" and actions:  # それでも無言なら保険（実モードは人格で言い換え）
             reply = actions[-1]["result"] if dry_run else _rephrase(actions[-1]["result"])
         # 捏造ガード：保存完了を口にしたのに保存ツールを呼んでいない → 強制実行して本当に保存する（ADR-0030）
         if (not dry_run and not any(a["tool"] in _SAVE_TOOLS for a in actions)

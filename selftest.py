@@ -166,6 +166,16 @@ run = win_ops.running_apps(tools.load_config())
 ok(isinstance(run, list), "running_apps がリスト返す")
 ok(win_ops.app_is_running("explorer.exe"), "app_is_running(explorer)=True")
 ok(not win_ops.app_is_running("絶対にない.exe"), "app_is_running(存在しない)=False")
+# 最小化/復元アクション（しまう・出す）が配線され、存在しない対象でも安全に失敗を返す
+_man = [t for t in tools.TOOL_DEFS if t["name"] == "manage_window"][0]
+ok({"minimize", "restore"} <= set(_man["input_schema"]["properties"]["action"]["enum"]),
+   "manage_window enum に minimize/restore")
+for _a in ("minimize", "restore"):
+    _okr, _msg = win_ops.manage_window(_a, titles=["__存在しない窓__"])
+    ok(_okr is False, f"manage_window({_a}) 対象なし→正直に失敗（{_msg[:14]}）")
+    # ディスパッチャ(tools._manage_window_win)が minimize/restore を弾かない（今回の真因の回帰）
+    _disp = tools.run_tool("manage_window", {"action": _a, "app": "__存在しない__"})
+    ok("未対応" not in _disp, f"run_tool(manage_window,{_a}) が未対応で弾かれない")
 
 # ---------------------------------------------------------------- 新機能（⑦窓把握 / ⑥全画面 / ④CDP / 状態連携）
 section("窓把握・全画面・CDP・状態")
@@ -176,6 +186,26 @@ ok(isinstance(win_ops.foreground_is_fullscreen(), bool), "foreground_is_fullscre
 import cdp
 ok(isinstance(cdp.available(), bool), "cdp.available（未起動でも安全に bool）")
 ok(cdp.close_by_url([]) == 0, "cdp.close_by_url 空リスト＝0")
+
+# ---------------------------------------------------------------- 高速パス（ADR-0043・誤爆ガードが命）
+section("fastpath 意図ルーティング")
+import fastpath
+_apps = tools.load_config().get("apps", {})
+_a_launch = next((n for n in ("電卓", "Discord", "Spotify") if tools._app_matches(_apps, n)), None)
+if _a_launch:
+    ok(fastpath.match(f"{_a_launch}ひらいて") and fastpath.match(f"{_a_launch}ひらいて")["kind"] == "launch",
+       f"「{_a_launch}ひらいて」→launch")
+    ok(fastpath.match(f"{_a_launch}閉じて")["kind"] == "close", f"「{_a_launch}閉じて」→close")
+    ok(fastpath.match(f"{_a_launch}、しまって")["kind"] == "minimize", "読点入り→minimize（名前から読点除去）")
+    ok(fastpath.match(f"{_a_launch}出して")["kind"] == "restore", f"「{_a_launch}出して」→restore")
+ok(fastpath.match("音量上げて")["kind"] == "volume", "「音量上げて」→volume")
+# 誤爆ガード：全部 None（LLM へ退避）でなければならない
+for _bad in ("ユニバ開いてる？", "電卓ってどう使うの", "さっきの閉じて", "全部閉じて",
+             "友達と通話する", "おはよ", "明日の天気は？", "課題終わった",
+             f"{_a_launch or 'Discord'}閉じて、YouTube出して"):
+    ok(fastpath.match(_bad) is None, f"誤爆ガード: {_bad!r}→None(LLM)")
+ok(fastpath.succeeded("電卓 を起動しました。") and not fastpath.succeeded("見つかりませんでした"),
+   "succeeded 判定（成功/失敗マーカー）")
 ok(cdp.tabs() == [] or cdp.available(), "cdp.tabs CDP無し＝空")
 ok(cdp.chrome_path() is None or cdp.chrome_path().lower().endswith("chrome.exe"), "chrome_path 形式")
 import voice as _v2
@@ -217,14 +247,20 @@ section("voice.py 起動スモーク")
 import os as _os
 import subprocess as _sp
 import sys as _sys
-_env = dict(_os.environ, MYAGENT_SMOKE="1", PYTHONUTF8="1")
-_r = _sp.run([_sys.executable, "voice.py"], env=_env, capture_output=True, text=True,
-             timeout=180, cwd=str(Path(__file__).parent), encoding="utf-8", errors="ignore")
-ok("SMOKE_OK" in (_r.stdout or ""), f"voice.py 起動→SMOKE_OK（exit={_r.returncode}）")
+# 実機の overlay は CREATE_NEW_CONSOLE で voice を起動し、その新コンソールは cp932 のことがある。
+# PYTHONUTF8=1 を渡すと UTF-8 モードに固定されて「絵文字 print が cp932 で落ちる」事故を隠してしまう
+# （実際それでバグが混入した）。なので PYTHONIOENCODING=cp932 で本番のコンソールを模し、絵文字 print が
+# 落ちないこと（＝entrypoint 側で標準出力を UTF-8 へ再設定していること）まで検証する。
+_env = dict(_os.environ, MYAGENT_SMOKE="1", PYTHONIOENCODING="cp932")
+_env.pop("PYTHONUTF8", None)
+_r = _sp.run([_sys.executable, "voice.py"], env=_env, capture_output=True,
+             timeout=180, cwd=str(Path(__file__).parent))
+_out = (_r.stdout or b"").decode("utf-8", "replace")
+ok("SMOKE_OK" in _out, f"voice.py 起動→SMOKE_OK（cp932コンソール模擬, exit={_r.returncode}）")
 
 # ---------------------------------------------------------------- 結果
 print(f"\n{'='*40}\n結果: PASS {PASS} / FAIL {FAIL}")
 if FAILS:
     print("失敗:", *FAILS, sep="\n  - ")
     sys.exit(1)
-print("全部PASS ✓")
+print("全部PASS OK")

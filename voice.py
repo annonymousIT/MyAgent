@@ -37,12 +37,24 @@ import numpy as np
 import sounddevice as sd
 import webrtcvad
 
+# 新コンソール（overlay が CREATE_NEW_CONSOLE で起動）が cp932 だと、🎤 等の絵文字 print が
+# UnicodeEncodeError で即クラッシュ→音声ループが起動せず「反応しない」。標準出力を UTF-8 に固定して防ぐ。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import core
+import fastpath
 import settings
 import speak as speak_mod
 import tools
 
 _STATE_PATH = Path(__file__).parent / "orb_state.txt"
+
+# 高速パス成功時の相槌（起動時につむぎ声でプリ合成→即再生。人格を保ったまま LLM 0回・¥0）。ADR-0043。
+FP_ACK_TEXTS = ["はーい", "りょうかい", "はい", "ん、やっといたよ", "おっけー"]
 
 
 def _set_state(s: str) -> None:
@@ -334,6 +346,7 @@ def main() -> None:
     # 相槌を事前合成（VOICEVOX未起動なら空＝相槌なしで動く）。現在の声設定で合成する。
     _vc = speak_mod._voice_cfg()
     fillers = [w for w in (speak_mod._vv_synth(t, *_vc) for t in FILLER_TEXTS) if w]
+    fp_acks = [w for w in (speak_mod._vv_synth(t, *_vc) for t in FP_ACK_TEXTS) if w]  # 高速パス相槌
 
     client = core.build_client()
     persona = core.load_persona() + VOICE_HINT
@@ -430,6 +443,29 @@ def main() -> None:
                 if closed and pending_front and pending_front not in _NO_RESTORE:
                     tools.activate_app(pending_front)
                 pending_eph, pending_front = [], ""
+
+            # 高速パス（ADR-0043）：起動/閉じる/しまう/出す/音量はコードで即実行＝LLM 0回・即時・¥0。
+            # レート制限・コスト・レイテンシを同時に下げる。曖昧なものは match が None を返し LLM へ落ちる。
+            fp_intent = fastpath.match(text)
+            if fp_intent is not None:
+                fp_res = fastpath.run(fp_intent)
+                if fastpath.succeeded(fp_res):
+                    _set_state("speaking")
+                    if fp_acks:                       # つむぎ相槌を即再生（人格を保ったまま¥0）
+                        speak_mod.play_wav_interruptible(random.choice(fp_acks))
+                    else:
+                        speak_mod.speak("はい", block=True)
+                    print(f"MyAgent: 〔高速パス〕{fp_res}", flush=True)
+                    # 次ターンの文脈用に履歴へ（API は呼んでいない＝コスト記録なし・¥0）
+                    history = (history + [
+                        {"role": "user", "content": text},
+                        {"role": "assistant", "content": fp_res},
+                    ])[-core.MAX_HISTORY_MESSAGES:]
+                    _set_state("idle")
+                    continue
+                # 失敗時：LLM 向けの生メッセージは喋らず、LLM パスへ委ねる（文脈と人格で適切に処理。
+                # 失敗＝何も起きていないので二重実行にならない）。下の run_turn へフォールスルー。
+                print(f"〔高速パス不成立→LLM〕{fp_res}", flush=True)
 
             front = tools._front_process() if speak_mod.IS_MAC else ""
 
