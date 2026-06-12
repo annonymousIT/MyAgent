@@ -332,8 +332,8 @@ def main() -> None:
     vocab_hint = _build_vocab_hint()  # Whisper の語彙ヒント（誤認識を減らす）
 
     # 相槌を事前合成（VOICEVOX未起動なら空＝相槌なしで動く）。現在の声設定で合成する。
-    _sp, _pi, _spd = speak_mod._voice_cfg()
-    fillers = [w for w in (speak_mod._vv_synth(t, _sp, _pi, _spd) for t in FILLER_TEXTS) if w]
+    _vc = speak_mod._voice_cfg()
+    fillers = [w for w in (speak_mod._vv_synth(t, *_vc) for t in FILLER_TEXTS) if w]
 
     client = core.build_client()
     persona = core.load_persona() + VOICE_HINT

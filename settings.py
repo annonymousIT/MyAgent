@@ -17,6 +17,7 @@ DEFAULTS = {
     "voicevox_speaker": "8",      # 春日部つむぎ（ノーマル）
     "voicevox_pitch": -0.085,     # 音高（負で低め）
     "voicevox_speed": 0.95,       # 話速（1.0=既定）
+    "voicevox_volume": 1.4,       # 出力音量（1.0=既定 / 大きいほど大音量・2.0程度まで）
     "say_voice": "Kyoko",         # VOICEVOX 未起動時の OS 音声（Mac）
     "orb_theme": "moonlight",     # orb の配色（moonlight / amethyst / mist / ember）
     "input_mode": "ptt",          # 入力方式 ptt（押してる間録音）/ wake（ウェイクワード）

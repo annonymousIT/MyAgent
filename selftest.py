@@ -46,8 +46,9 @@ ok(spk.clean_for_speech("はい^^;") == "はい", "顔文字^^;除去")
 ok("、" in spk.clean_for_speech("えっと…そう"), "三点リーダ→読点")
 ok(spk.clean_for_speech("**太字** `code`").find("*") == -1, "Markdown除去")
 ok(spk.clean_for_speech("   　 ") == "", "空白のみ→空")
-sp, pi, spd = spk._voice_cfg()
+sp, pi, spd, vol = spk._voice_cfg()
 ok(sp == "3", "_voice_cfg が settings 反映(speaker=3)")
+ok(isinstance(vol, float), "_voice_cfg が音量も返す(4要素)")
 ok(spk.voice_enabled() is False, "voice_enabled が settings 反映(False)")
 settings.save({"voice_enabled": True})  # 戻す
 

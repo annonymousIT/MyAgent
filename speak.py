@@ -35,6 +35,8 @@ VOICEVOX_SPEAKER = os.environ.get("VOICEVOX_SPEAKER", "8")
 VOICEVOX_PITCH = float(os.environ.get("VOICEVOX_PITCH", "-0.085"))
 # 話速。1.0=既定、小さいほど遅い。ほんの少しだけ遅く。env VOICEVOX_SPEED で調整可。
 VOICEVOX_SPEED = float(os.environ.get("VOICEVOX_SPEED", "0.95"))
+# 出力音量。1.0=既定、大きいほど大音量（2.0程度まで）。env VOICEVOX_VOLUME で調整可。
+VOICEVOX_VOLUME = float(os.environ.get("VOICEVOX_VOLUME", "1.0"))
 
 # `say` 用の日本語ボイス（VOICEVOX未導入時のフォールバック）。英語ボイスだと日本語＝記号読みになる。
 SAY_VOICE = os.environ.get("SAY_VOICE", "Kyoko")
@@ -57,21 +59,22 @@ def clean_for_speech(text: str) -> str:
     return t
 
 
-def _voice_cfg() -> "tuple[str, float, float]":
-    """発声設定（speaker, pitch, speed）を取得。優先順位：環境変数 > settings.json > 既定。
+def _voice_cfg() -> "tuple[str, float, float, float]":
+    """発声設定（speaker, pitch, speed, volume）を取得。優先順位：環境変数 > settings.json > 既定。
 
     settings.json は overlay.py の設定画面が書き換える。ここで毎回読むので再起動なしで反映。
     """
-    speaker, pitch, speed = VOICEVOX_SPEAKER, VOICEVOX_PITCH, VOICEVOX_SPEED
+    speaker, pitch, speed, volume = VOICEVOX_SPEAKER, VOICEVOX_PITCH, VOICEVOX_SPEED, VOICEVOX_VOLUME
     try:
         import settings
         s = settings.load()
         speaker = os.environ.get("VOICEVOX_SPEAKER") or str(s.get("voicevox_speaker", speaker))
         pitch = float(os.environ.get("VOICEVOX_PITCH", s.get("voicevox_pitch", pitch)))
         speed = float(os.environ.get("VOICEVOX_SPEED", s.get("voicevox_speed", speed)))
+        volume = float(os.environ.get("VOICEVOX_VOLUME", s.get("voicevox_volume", volume)))
     except Exception:
         pass
-    return speaker, pitch, speed
+    return speaker, pitch, speed, volume
 
 
 def voice_enabled() -> bool:
@@ -85,7 +88,7 @@ def voice_enabled() -> bool:
         return True
 
 
-def _vv_synth(text: str, speaker: str, pitch: float, speed: float) -> "bytes | None":
+def _vv_synth(text: str, speaker: str, pitch: float, speed: float, volume: float = 1.0) -> "bytes | None":
     """1チャンクを VOICEVOX で合成して WAV を返す。失敗（エンジン未起動含む）は None。"""
     try:
         q = urllib.parse.urlencode({"text": text, "speaker": speaker})
@@ -93,6 +96,7 @@ def _vv_synth(text: str, speaker: str, pitch: float, speed: float) -> "bytes | N
         query = json.loads(urllib.request.urlopen(req, timeout=2).read())
         query["pitchScale"] = pitch
         query["speedScale"] = speed
+        query["volumeScale"] = volume
         req2 = urllib.request.Request(
             f"{VOICEVOX_URL}/synthesis?speaker={speaker}",
             data=json.dumps(query).encode("utf-8"),
@@ -162,11 +166,11 @@ def play_wav_interruptible(wav_bytes: bytes, stop_check=None) -> bool:
 def _voicevox_speak(text: str) -> bool:
     """VOICEVOX で読み上げ。文ごとにストリーミング（最初の一文を合成したら即再生し、
     残りは裏で合成）→ 体感の出だしが速い。成功 True / エンジン未起動など False（→sayへ）。"""
-    speaker, pitch, speed = _voice_cfg()
+    speaker, pitch, speed, volume = _voice_cfg()
     parts = [p for p in re.split(r"(?<=[。！？!?])", text) if p.strip()]
     if not parts:
         parts = [text]
-    first = _vv_synth(parts[0], speaker, pitch, speed)
+    first = _vv_synth(parts[0], speaker, pitch, speed, volume)
     if first is None:
         return False  # エンジン未起動 → 呼び出し側で say フォールバック
     import queue as _queue
@@ -175,7 +179,7 @@ def _voicevox_speak(text: str) -> bool:
 
     def _produce() -> None:
         for p in parts[1:]:
-            q.put(_vv_synth(p, speaker, pitch, speed))
+            q.put(_vv_synth(p, speaker, pitch, speed, volume))
         q.put(None)
 
     threading.Thread(target=_produce, daemon=True).start()  # 残りを裏で合成

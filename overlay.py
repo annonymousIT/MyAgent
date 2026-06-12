@@ -394,26 +394,31 @@ class Orb:
         speed_var = tk.DoubleVar(value=float(cfg.get("voicevox_speed", 0.95)))
         ttk.Scale(win, from_=0.7, to=1.3, variable=speed_var, length=160).grid(row=5, column=1, sticky="ew", pady=4)
 
+        # 音量
+        ttk.Label(win, text="声の大きさ").grid(row=6, column=0, sticky="w", pady=4)
+        vol_var = tk.DoubleVar(value=float(cfg.get("voicevox_volume", 1.4)))
+        ttk.Scale(win, from_=0.5, to=2.0, variable=vol_var, length=160).grid(row=6, column=1, sticky="ew", pady=4)
+
         # 入力方式（次回の聴取開始から反映）
-        ttk.Label(win, text="聞き方").grid(row=6, column=0, sticky="w", pady=4)
+        ttk.Label(win, text="聞き方").grid(row=7, column=0, sticky="w", pady=4)
         _MODE_JA = {"ptt": "右Ctrl押して話す(PTT)", "wake": "やっほーエージェント(ウェイク)"}
         modeja2key = {v: k for k, v in _MODE_JA.items()}
         cur_mode = _MODE_JA.get(cfg.get("input_mode", "ptt"), _MODE_JA["ptt"])
         mode_var = tk.StringVar(value=cur_mode)
-        ttk.OptionMenu(win, mode_var, cur_mode, *_MODE_JA.values()).grid(row=6, column=1, sticky="ew", pady=4)
+        ttk.OptionMenu(win, mode_var, cur_mode, *_MODE_JA.values()).grid(row=7, column=1, sticky="ew", pady=4)
 
         # orb の配色（保存で実行中の orb に即反映）
-        ttk.Label(win, text="orb の色").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Label(win, text="orb の色").grid(row=8, column=0, sticky="w", pady=4)
         _THEME_JA = {"moonlight": "月明かり", "amethyst": "紫水晶", "mist": "霞", "ember": "灯火"}
         ja2key = {v: k for k, v in _THEME_JA.items()}
         cur_theme = _THEME_JA.get(cfg.get("orb_theme", "moonlight"), "月明かり")
         theme_var = tk.StringVar(value=cur_theme)
-        ttk.OptionMenu(win, theme_var, cur_theme, *_THEME_JA.values()).grid(row=7, column=1, sticky="ew", pady=4)
+        ttk.OptionMenu(win, theme_var, cur_theme, *_THEME_JA.values()).grid(row=8, column=1, sticky="ew", pady=4)
 
         # 今月の予算
         budget_txt = _budget_line()
         ttk.Label(win, text=budget_txt, foreground="#888").grid(
-            row=8, column=0, columnspan=2, sticky="w", pady=(12, 8))
+            row=9, column=0, columnspan=2, sticky="w", pady=(12, 8))
 
         def _collect() -> dict:
             return {
@@ -421,6 +426,7 @@ class Orb:
                 "voicevox_speaker": SPEAKERS.get(name_var.get(), "8"),
                 "voicevox_pitch": round(pitch_var.get(), 3),
                 "voicevox_speed": round(speed_var.get(), 2),
+                "voicevox_volume": round(vol_var.get(), 2),
                 "orb_theme": ja2key.get(theme_var.get(), "moonlight"),
                 "input_mode": modeja2key.get(mode_var.get(), "ptt"),
                 "noise_reduction": nr_var.get(),
@@ -448,7 +454,7 @@ class Orb:
             ).start()
 
         btns = ttk.Frame(win)
-        btns.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        btns.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         ttk.Button(btns, text="🔊 声をテスト", command=_test).pack(side="left")
         ttk.Button(btns, text="保存", command=_save).pack(side="right")
         ttk.Button(btns, text="閉じる", command=win.destroy).pack(side="right", padx=6)
