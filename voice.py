@@ -58,9 +58,10 @@ SILENCE_MS = int(os.environ.get("SILENCE_MS", "550"))  # 発話終了とみな�
 SILENCE_FRAMES = SILENCE_MS // FRAME_MS
 PAD_FRAMES = 10                                   # 発話開始判定の前後バッファ
 MIN_SPEECH_FRAMES = 8                             # これ未満は雑音として無視
-# small は base より格段に精度が高い（「電卓/ディスコード/原神」等の取り違えが激減）。
-# GPU(cuda)があれば一瞬、無ければCPUでも約1.5秒で実用。環境変数で上書き可。
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
+# モデルはデバイスで自動選択（環境変数 WHISPER_MODEL で固定も可）:
+#   GPU(cuda) → medium（0.28s/発話・実測5/5全問正解。「要約/予約」も正しく取れる）
+#   CPU      → small （medium はCPUだと数秒かかるため。1.5s/発話・十分正確）
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "")  # 空 = 自動
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "auto")  # auto / cuda / cpu
 
 # その一言だけ言ったときのみ終了（「ゲーム終了して」等の誤爆防止で完全一致）
@@ -277,26 +278,36 @@ def _add_cuda_dll_dirs() -> None:
                 os.add_dll_directory(d)
             except Exception:
                 pass
+    # ctranslate2 は cuBLAS を実行時に通常の検索順（PATH）でロードするため、PATH にも前置する
+    # （add_dll_directory だけでは拾われない）。
+    dirs = [d for d in cands if Path(d).is_dir()]
+    if dirs:
+        os.environ["PATH"] = ";".join(dirs) + ";" + os.environ.get("PATH", "")
 
 
 def _load_whisper():
-    """Whisper モデルを読み込む。device=auto なら GPU を試し、ダメなら CPU に自動フォールバック。"""
+    """Whisper モデルを読み込む。device=auto なら GPU を試し、ダメなら CPU に自動フォールバック。
+
+    モデルはデバイス別に最適なものを自動選択（GPU=medium / CPU=small）。WHISPER_MODEL で固定可。
+    """
     from faster_whisper import WhisperModel
     want = WHISPER_DEVICE
     if want in ("auto", "cuda"):
+        name = WHISPER_MODEL or "medium"
         try:
             _add_cuda_dll_dirs()
-            m = WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
+            m = WhisperModel(name, device="cuda", compute_type="float16")
             list(m.transcribe(np.zeros(16000, dtype=np.float32), language="ja", beam_size=1)[0])
-            print(f"  Whisper: {WHISPER_MODEL} / GPU(cuda)", flush=True)
+            print(f"  Whisper: {name} / GPU(cuda)", flush=True)
             return m
         except Exception as e:  # noqa: BLE001
             if want == "cuda":
                 print(f"  GPU指定だが使えません（{type(e).__name__}）。CPUに切替。", flush=True)
             else:
-                print("  GPU未使用→CPUで動かします（GPUを使うとより速い）。", flush=True)
-    m = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-    print(f"  Whisper: {WHISPER_MODEL} / CPU", flush=True)
+                print("  GPU未使用→CPUで動かします（cudaフォルダにDLLを置くと速くなります）。", flush=True)
+    name = WHISPER_MODEL or "small"
+    m = WhisperModel(name, device="cpu", compute_type="int8")
+    print(f"  Whisper: {name} / CPU", flush=True)
     return m
 
 
