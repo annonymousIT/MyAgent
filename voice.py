@@ -38,6 +38,7 @@ import sounddevice as sd
 import webrtcvad
 
 import core
+import settings
 import speak as speak_mod
 import tools
 
@@ -355,6 +356,9 @@ def main() -> None:
               "（聞き返された時だけそのまま答えてOK / 「終了」で停止）", flush=True)
         speak_mod.speak(f"音声モードです。{WAKE_PHRASE}、と呼んでくださいね。", block=True)
     _set_state("idle")  # 準備完了（orb の「準備中」表示を解除）
+    if os.environ.get("MYAGENT_SMOKE") == "1":  # 起動スモークテスト用：マイクループ直前で正常終了
+        print("SMOKE_OK", flush=True)
+        return
 
     # マイクは開きっぱなしで使い回す（毎回 open すると数百ms ロスし発話の頭も欠ける・#34）
     mic = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME)

@@ -211,6 +211,16 @@ intr = _spk.play_wav_interruptible(buf.getvalue(), stop_check=lambda: _time.time
 dt = _time.time() - t0
 ok(intr and dt < 1.2, f"barge-in: 2秒のWAVを{dt:.2f}sで中断")
 
+# ---------------------------------------------------------------- 起動スモーク（importミス等で main が落ちるのを検出）
+section("voice.py 起動スモーク")
+import os as _os
+import subprocess as _sp
+import sys as _sys
+_env = dict(_os.environ, MYAGENT_SMOKE="1", PYTHONUTF8="1")
+_r = _sp.run([_sys.executable, "voice.py"], env=_env, capture_output=True, text=True,
+             timeout=180, cwd=str(Path(__file__).parent), encoding="utf-8", errors="ignore")
+ok("SMOKE_OK" in (_r.stdout or ""), f"voice.py 起動→SMOKE_OK（exit={_r.returncode}）")
+
 # ---------------------------------------------------------------- 結果
 print(f"\n{'='*40}\n結果: PASS {PASS} / FAIL {FAIL}")
 if FAILS:
