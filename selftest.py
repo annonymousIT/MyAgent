@@ -182,6 +182,35 @@ _v2._set_state("thinking")
 ok(_v2._STATE_PATH.read_text(encoding="utf-8").strip() == "thinking", "orb_state.txt 書き込み")
 _v2._set_state("idle")
 
+# ---------------------------------------------------------------- タイマー/クリップボード/危険操作確認
+section("タイマー・クリップボード・危険操作")
+ok("セットしました" in tools.set_timer(1, "テスト"), "set_timer 正常")
+ok("解釈できません" in tools.set_timer("abc"), "set_timer 不正値")
+ok("24時間以内" in tools.set_timer(99999), "set_timer 上限")
+ok("キャンセルしました" in tools.cancel_timers(), "cancel_timers")
+ok("セット中のタイマーはありません" in tools.cancel_timers(), "cancel_timers 空")
+import tkinter as _tk
+_r = _tk.Tk(); _r.withdraw(); _r.clipboard_clear(); _r.clipboard_append("テスト用の文章です"); _r.update()
+cb = tools.read_clipboard()
+_r.destroy()
+ok("テスト用の文章です" in cb, "read_clipboard 実テキスト取得")
+# 危険操作：confirmed 無し→実行せず確認要求 / input() でブロックしない（音声フリーズバグの回帰防止）
+r = tools.run_system("再起動")
+ok("未実行" in r and "confirmed=true" in r, "危険操作は confirmed 無しで実行されない")
+ok("実行しました" in tools.run_system("ミュート") and "実行しました" in tools.run_system("ミュート解除"),
+   "安全操作は即実行（ミュート→解除）")
+# barge-in: 中断可能再生が stop_check で早期に止まる
+import io as _io, struct as _st, time as _time, wave as _wave
+buf = _io.BytesIO()
+with _wave.open(buf, "wb") as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+    w.writeframes(b"\x00\x00" * 16000 * 2)  # 2秒の無音
+import speak as _spk
+t0 = _time.time()
+intr = _spk.play_wav_interruptible(buf.getvalue(), stop_check=lambda: _time.time() - t0 > 0.3)
+dt = _time.time() - t0
+ok(intr and dt < 1.2, f"barge-in: 2秒のWAVを{dt:.2f}sで中断")
+
 # ---------------------------------------------------------------- 結果
 print(f"\n{'='*40}\n結果: PASS {PASS} / FAIL {FAIL}")
 if FAILS:

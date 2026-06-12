@@ -122,6 +122,43 @@ def _play_wav(wav: bytes) -> None:
                 pass
 
 
+def play_wav_interruptible(wav_bytes: bytes, stop_check=None) -> bool:
+    """WAV を再生する。stop_check() が True を返したら即停止（barge-in：読み上げ中に話しかけられる）。
+
+    sounddevice で再生しつつ 50ms ごとに stop_check を見る。中断したら True。
+    失敗時は従来の _play_wav にフォールバック（中断不可だが音は出る）。
+    """
+    try:
+        import io as _io
+        import time as _time
+        import wave as _wave
+
+        import numpy as _np
+        import sounddevice as _sd
+        with _wave.open(_io.BytesIO(wav_bytes), "rb") as w:
+            sr = w.getframerate()
+            ch = w.getnchannels()
+            data = _np.frombuffer(w.readframes(w.getnframes()), dtype=_np.int16)
+        if ch > 1:
+            data = data.reshape(-1, ch)
+        _sd.play(data, sr)
+        if stop_check is None:
+            _sd.wait()
+            return False
+        dur = len(data) / sr
+        t0 = _time.time()
+        while _time.time() - t0 < dur:
+            if stop_check():
+                _sd.stop()
+                return True
+            _time.sleep(0.05)
+        _sd.wait()
+        return False
+    except Exception:
+        _play_wav(wav_bytes)
+        return False
+
+
 def _voicevox_speak(text: str) -> bool:
     """VOICEVOX で読み上げ。文ごとにストリーミング（最初の一文を合成したら即再生し、
     残りは裏で合成）→ 体感の出だしが速い。成功 True / エンジン未起動など False（→sayへ）。"""

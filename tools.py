@@ -286,21 +286,21 @@ def _run_system_native(action: str) -> "str | None":
     return None
 
 
-def run_system(name: str) -> str:
+def run_system(name: str, confirmed: bool = False) -> str:
     """システム操作（音量・モニタ・スリープ等）を実行する。
 
     日本語の言い回しを正規アクションに寄せ、OSネイティブで実行（nircmd/osascript 非依存）。
-    危険操作（スリープ・再起動・シャットダウン）は実行前に確認を挟む（非対話環境では実行しない）。
+    危険操作（スリープ・再起動・シャットダウン）は **会話で確認**してから confirmed=true で呼び直す
+    （旧実装の input() は音声モードでコンソール入力待ちになりフリーズ同然だった＝廃止）。
     既定の語彙に無い名前は、後方互換で config の system / dangerous_system 文字列を試す。
     """
     action = _SYSTEM_ALIASES.get(name.strip()) if name else None
 
     if action:
-        if action in _DANGEROUS_ACTIONS:
-            if not sys.stdin or not sys.stdin.isatty():
-                return f"『{name}』は危険な操作です。安全のため、この画面からは実行しません（ターミナルから操作してください）。"
-            if input(f"⚠ 『{name}』を実行しますか？ [y/N] ").strip().lower() != "y":
-                return f"{name} は中止しました。"
+        if action in _DANGEROUS_ACTIONS and not confirmed:
+            # 実行せず「ユーザーに確認しろ」とLLMへ返す。はい/OKをもらってから confirmed=true で再呼び出し。
+            return (f"（未実行）『{name}』は危険な操作です。ユーザーに「本当に{name}していいですか？」と確認し、"
+                    "明確に肯定されたら run_system を confirmed=true で呼び直してください。")
         msg = _run_system_native(action)
         if msg is not None:
             return f"{name} を{msg}"
@@ -313,12 +313,11 @@ def run_system(name: str) -> str:
         subprocess.run(safe[name], shell=True, check=False)
         return f"{name} を実行しました。"
     if name in dangerous and not IS_WINDOWS:
-        if not sys.stdin or not sys.stdin.isatty():
-            return f"『{name}』は危険な操作です。この画面からは実行しません。"
-        if input(f"⚠ 『{name}』を実行しますか？ [y/N] ").strip().lower() == "y":
-            subprocess.run(dangerous[name], shell=True, check=False)
-            return f"{name} を実行しました。"
-        return f"{name} は中止しました。"
+        if not confirmed:
+            return (f"（未実行）『{name}』は危険な操作です。ユーザーに確認し、"
+                    "肯定されたら confirmed=true で呼び直してください。")
+        subprocess.run(dangerous[name], shell=True, check=False)
+        return f"{name} を実行しました。"
 
     return f"『{name}』に対応するシステム操作が見つかりませんでした。"
 
@@ -927,6 +926,95 @@ def _app_is_running(target: str) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------
+# タイマー（「3分測って」）と クリップボード（「コピーしたやつ読んで」）
+# --------------------------------------------------------------------------
+_TIMERS: "list" = []  # [(threading.Timer, label, fire_time)]
+
+
+def set_timer(minutes: float, label: str = "") -> str:
+    """タイマーをセットする。時間が来たら音＋声で知らせる（このプロセスが生きている間有効）。"""
+    import threading as _th
+    try:
+        mins = float(minutes)
+    except (TypeError, ValueError):
+        return "時間（分）が解釈できませんでした。"
+    if not 0 < mins <= 24 * 60:
+        return "1分未満〜24時間の範囲で指定してください。" if mins <= 0 else "24時間以内で指定してください。"
+    name = (label or "").strip() or "タイマー"
+
+    def _fire() -> None:
+        try:
+            if IS_WINDOWS:
+                import winsound
+                for _ in range(3):
+                    winsound.Beep(1175, 180)
+                    winsound.Beep(880, 180)
+            import speak
+            mins_label = int(mins) if mins == int(mins) else round(mins, 1)
+            speak.speak(f"マスター、{mins_label}分経ちました。{name if name != 'タイマー' else ''}の時間ですよ。"
+                        if name != "タイマー" else f"マスター、{mins_label}分経ちました。")
+        except Exception:
+            pass
+
+    t = _th.Timer(mins * 60, _fire)
+    t.daemon = True
+    t.start()
+    _TIMERS.append((t, name, time.time() + mins * 60))
+    mins_label = int(mins) if mins == int(mins) else round(mins, 1)
+    return f"{mins_label}分の{name}をセットしました（エージェント起動中のみ有効）。"
+
+
+def cancel_timers() -> str:
+    """セット中のタイマーを全部止める。"""
+    n = 0
+    for t, _name, _at in _TIMERS:
+        try:
+            t.cancel()
+            n += 1
+        except Exception:
+            pass
+    _TIMERS.clear()
+    return f"タイマーを{n}件キャンセルしました。" if n else "セット中のタイマーはありません。"
+
+
+def read_clipboard() -> str:
+    """クリップボードのテキストを読む（「コピーしたやつ読んで/要約して/翻訳して」の材料）。
+
+    返した本文をモデルが要約・読み上げする。捏造防止：実際の中身だけを根拠にする。
+    """
+    text = ""
+    try:
+        if IS_WINDOWS:
+            import ctypes
+            CF_UNICODETEXT = 13
+            u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+            # 64bit ではハンドル/ポインタの restype 指定が必須（既定 c_int だと上位ビットが切れて落ちる）
+            u32.GetClipboardData.restype = ctypes.c_void_p
+            k32.GlobalLock.restype = ctypes.c_void_p
+            k32.GlobalLock.argtypes = [ctypes.c_void_p]
+            k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+            if u32.OpenClipboard(0):
+                try:
+                    h = u32.GetClipboardData(CF_UNICODETEXT)
+                    if h:
+                        p = k32.GlobalLock(h)
+                        if p:
+                            text = ctypes.wstring_at(p)
+                            k32.GlobalUnlock(h)
+                finally:
+                    u32.CloseClipboard()
+        elif IS_MAC:
+            r = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=4)
+            text = r.stdout
+    except Exception as e:
+        return f"クリップボードが読めませんでした（{type(e).__name__}）。"
+    text = (text or "").strip()
+    if not text:
+        return "クリップボードは空（またはテキスト以外）です。"
+    return f"クリップボードの内容（実データ・{len(text)}字）:\n{text[:2000]}"
+
+
 def monitor_count() -> int:
     """接続モニタ数（プロンプトで『画面は◯枚』と伝えるため）。Windows以外は1とみなす。"""
     if not IS_WINDOWS:
@@ -972,8 +1060,12 @@ TOOL_DEFS = [
     },
     {
         "name": "run_system",
-        "description": "Run a system action (volume/display/sleep). name = key in system config.",
-        "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        "description": "Run a system action (volume/display/lock/media/sleep...). Dangerous ones (sleep/"
+                       "restart/shutdown) return a confirmation request first; after the user clearly "
+                       "agrees, call again with confirmed=true.",
+        "input_schema": {"type": "object",
+                         "properties": {"name": {"type": "string"}, "confirmed": {"type": "boolean"}},
+                         "required": ["name"]},
     },
     {
         "name": "web_search",
@@ -1049,6 +1141,23 @@ TOOL_DEFS = [
         "description": "Close an open app/site (閉じて/消して/やめて). name = target app/site; use the just-opened one from context.",
         "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
     },
+    {
+        "name": "set_timer",
+        "description": "Timer (3分測って/30分後に教えて). Fires a chime + spoken alert. label = what it's for.",
+        "input_schema": {"type": "object",
+                         "properties": {"minutes": {"type": "number"}, "label": {"type": "string"}},
+                         "required": ["minutes"]},
+    },
+    {
+        "name": "cancel_timers",
+        "description": "Cancel all running timers (タイマー止めて/キャンセル).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_clipboard",
+        "description": "Read clipboard text (コピーしたやつ/クリップボード 読んで・要約して・翻訳して). Returns the real content to base your reply on.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 # ツール名 → 実関数
@@ -1066,6 +1175,9 @@ DISPATCH = {
     "remember": remember,
     "add_schedule": add_schedule,
     "forget": forget,
+    "set_timer": set_timer,
+    "cancel_timers": cancel_timers,
+    "read_clipboard": read_clipboard,
 }
 
 

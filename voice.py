@@ -430,7 +430,15 @@ def main() -> None:
 
             threading.Thread(target=_work, daemon=True).start()
 
+            # barge-in（PTTのみ）：読み上げ中に右Ctrlが押されたら即黙る（残りのチャンクも読み捨て）
+            def _interrupt() -> bool:
+                if mode != "ptt":
+                    return False
+                import ctypes
+                return bool(ctypes.windll.user32.GetAsyncKeyState(ptt_vk) & 0x8000)
+
             spoke_any = False
+            barged = False
             i = 0
             first = True
             while True:
@@ -438,7 +446,7 @@ def main() -> None:
                     slot = slots[i] if i < len(slots) else None
                 if slot is None:
                     if done.is_set():
-                        break              # 全チャンク再生済み
+                        break              # 全チャンク再生済み（または読み捨て済み）
                     time.sleep(0.02)
                     continue
                 if first:                  # 最初のチャンクが0.9秒で合成されなければ相槌で間を埋める
@@ -446,9 +454,14 @@ def main() -> None:
                         speak_mod._play_wav(random.choice(fillers))
                     first = False
                 slot["ev"].wait()          # このチャンクの合成完了を待つ（裏で次も合成中）
+                if barged:
+                    i += 1                 # 中断後：残りは再生せず読み捨て（LLM完了までは回す）
+                    continue
                 if slot["wav"]:
                     _set_state("speaking")
-                    speak_mod._play_wav(slot["wav"])
+                    if speak_mod.play_wav_interruptible(slot["wav"], _interrupt):
+                        barged = True      # 右Ctrlで即中断 → そのまま次の発話を聞きにいく
+                        print("（読み上げを中断）", flush=True)
                     spoke_any = True
                 elif slot["text"]:         # 合成失敗（エンジン落ち等）→ OS音声でフォールバック
                     speak_mod.speak(slot["text"], block=True)
@@ -461,7 +474,7 @@ def main() -> None:
             history = result["history"]
             reply = result["reply"]
             print(f"MyAgent: {reply}", flush=True)
-            if not spoke_any and reply:                   # 予算上限など、ストリームを通らなかった返答
+            if not spoke_any and reply and not barged:    # 予算上限など、ストリームを通らなかった返答
                 speak_mod.speak(reply, block=True)
             c = result.get("cost") or {}
             if c:
