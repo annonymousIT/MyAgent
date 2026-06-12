@@ -79,10 +79,14 @@ class Orb:
             pass
         self.root.config(bg=CHROMA)
 
-        # 右下あたりに初期配置
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        self.root.geometry(f"{SIZE}x{SIZE}+{sw - SIZE - 60}+{sh - SIZE - 120}")
+        # 前回の位置（ドラッグで保存）があればそこへ、無ければ右下に初期配置
+        pos = settings.get("orb_pos")
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            self.root.geometry(f"{SIZE}x{SIZE}+{int(pos[0])}+{int(pos[1])}")
+        else:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            self.root.geometry(f"{SIZE}x{SIZE}+{sw - SIZE - 60}+{sh - SIZE - 120}")
 
         self.canvas = tk.Canvas(self.root, width=SIZE, height=SIZE,
                                 bg=CHROMA, highlightthickness=0)
@@ -111,6 +115,10 @@ class Orb:
         self._poll_voice()                # 子プロセス監視＋状態ファイル読み
         self._poll_fullscreen()           # 全画面アプリの間は自動で隠れる（ゲーム/動画の邪魔をしない）
         self._animate()
+        # 自動聴取（既定ON・PTTのみ）：orb が出たら聴取も待機開始＝クリックすら不要で右Ctrl→即話せる。
+        # PTT は押した時しか録音しないので常時待機でも安全（wake モードは明示クリックのみ＝勝手に聴かない）。
+        if settings.get("auto_listen", True) and settings.get("input_mode", "ptt") == "ptt":
+            self.root.after(1500, self._start_voice)
 
     # ---- アニメーション（中心は静止、周囲が水の波紋のように広がる）----
     def _animate(self) -> None:
@@ -150,7 +158,8 @@ class Orb:
 
         # 中心の球：単色フラット（同心円のグラデは“目玉”に見えるためユーザー却下・2026-06-12）。
         # 状態は「単色の明るさ」だけで表現：待機=落ち着いた色 / 聴取=明るい / 考え中・発話中=さらに明るい。
-        t_bright = {"idle": 0.0, "recording": 0.35, "thinking": 0.5, "speaking": 0.5}.get(self.voice_state, 0.0)
+        t_bright = {"idle": 0.0, "loading": 0.12, "recording": 0.35,
+                    "thinking": 0.5, "speaking": 0.5}.get(self.voice_state, 0.0)
         if self.listening and t_bright == 0.0:
             t_bright = 0.35
         body = _lerp(th["body"], th["bright"], t_bright)
@@ -175,6 +184,11 @@ class Orb:
     def _on_release(self, e) -> None:
         if not self._moved:        # 動かさずに離した＝クリック → 聴取ON/OFF
             self._toggle_listening()
+        else:                      # ドラッグで動かした → 位置を保存（次回も同じ場所に出る）
+            try:
+                settings.save({"orb_pos": [self.root.winfo_x(), self.root.winfo_y()]})
+            except Exception:
+                pass
         self._press = None
 
     def _on_right(self, e) -> None:
@@ -353,13 +367,15 @@ class Orb:
         ttk.Label(win, text="マスター専属PCパートナーの設定", foreground="#666").grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
-        # 音声 ON/OFF ＋ ノイズ抑制
+        # チェック群：声を出す / ノイズ抑制 / 起動と同時に聴取
+        checks = ttk.Frame(win)
+        checks.grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
         voice_var = tk.BooleanVar(value=bool(cfg.get("voice_enabled", True)))
-        ttk.Checkbutton(win, text="声を出す", variable=voice_var).grid(
-            row=2, column=0, sticky="w", pady=4)
+        ttk.Checkbutton(checks, text="声を出す", variable=voice_var).pack(side="left")
         nr_var = tk.BooleanVar(value=bool(cfg.get("noise_reduction", True)))
-        ttk.Checkbutton(win, text="ノイズ抑制", variable=nr_var).grid(
-            row=2, column=1, sticky="w", pady=4)
+        ttk.Checkbutton(checks, text="ノイズ抑制", variable=nr_var).pack(side="left", padx=(10, 0))
+        auto_var = tk.BooleanVar(value=bool(cfg.get("auto_listen", True)))
+        ttk.Checkbutton(checks, text="起動と同時に聴取(PTT)", variable=auto_var).pack(side="left", padx=(10, 0))
 
         # 声の種類
         ttk.Label(win, text="声（VOICEVOX）").grid(row=3, column=0, sticky="w", pady=4)
@@ -408,6 +424,7 @@ class Orb:
                 "orb_theme": ja2key.get(theme_var.get(), "moonlight"),
                 "input_mode": modeja2key.get(mode_var.get(), "ptt"),
                 "noise_reduction": nr_var.get(),
+                "auto_listen": auto_var.get(),
             }
 
         def _apply_theme() -> None:

@@ -22,6 +22,8 @@ DEFAULTS = {
     "input_mode": "ptt",          # 入力方式 ptt（押してる間録音）/ wake（ウェイクワード）
     "ptt_key": 163,               # PTT キーの仮想キーコード（既定 163=右Ctrl/VK_RCONTROL）
     "noise_reduction": True,      # 録音のノイズ抑制（ファン/ホワイトノイズに有効）
+    "auto_listen": True,          # orb起動と同時に聴取開始（PTTは押した時しか録音しない＝常時でも安全）
+    "orb_pos": None,              # orb の位置 [x, y]（ドラッグ後に保存・次回も同じ場所に出る）
 }
 
 

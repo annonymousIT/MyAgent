@@ -154,7 +154,8 @@ def _record_while_held(mic: "sd.InputStream", vk: int) -> "np.ndarray | None":
         time.sleep(0.03)
     print("🎤 録音中（離すと送信）…", end="\r", flush=True)
     _set_state("recording")
-    _flush_mic_global(mic)                          # 押した瞬間より前の音は捨てる
+    _beep(988, 70)                                  # ピッ＝録音開始（耳で分かる合図）
+    _flush_mic_global(mic)                          # 押した瞬間より前の音（ビープ含む）は捨てる
     frames: "list[np.ndarray]" = []
     while u.GetAsyncKeyState(vk) & PRESSED:         # 押している間だけ録る
         try:
@@ -162,6 +163,7 @@ def _record_while_held(mic: "sd.InputStream", vk: int) -> "np.ndarray | None":
         except Exception:
             break
         frames.append(block[:, 0])
+    _beep(660, 60)                                  # ポッ＝録音終了・送信
     if len(frames) < MIN_SPEECH_FRAMES:
         return None
     return np.concatenate(frames)
@@ -279,8 +281,18 @@ def _load_whisper():
     return m
 
 
+def _beep(freq: int, ms: int) -> None:
+    """PTTの録音開始/終了の合図音（「今録れてるか」を耳で分かるように）。失敗しても無視。"""
+    try:
+        import winsound
+        winsound.Beep(freq, ms)
+    except Exception:
+        pass
+
+
 def main() -> None:
     print("Whisper モデル読込中…（初回はDLあり）", flush=True)
+    _set_state("loading")   # orb は「準備中」表示（この間に喋っても聞こえない、を見た目で伝える）
     model = _load_whisper()
     # ウォームアップ（初回呼び出しの遅延をここで吸収）
     list(model.transcribe(np.zeros(8000, dtype=np.float32), language="ja", beam_size=1)[0])
@@ -312,6 +324,7 @@ def main() -> None:
         print(f"🎤 ウェイクワードモード。毎回「{WAKE_PHRASE}」と呼びかけて話してください"
               "（聞き返された時だけそのまま答えてOK / 「終了」で停止）", flush=True)
         speak_mod.speak(f"音声モードです。{WAKE_PHRASE}、と呼んでくださいね。", block=True)
+    _set_state("idle")  # 準備完了（orb の「準備中」表示を解除）
 
     # マイクは開きっぱなしで使い回す（毎回 open すると数百ms ロスし発話の頭も欠ける・#34）
     mic = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=FRAME)
@@ -470,6 +483,8 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001
             _set_state("idle")
             print(f"⚠ {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            # 無言で固まらない：エラーも声で正直に伝える（人格は保つ・詳細はコンソールに）
+            speak_mod.speak("すみません、ちょっと調子が悪いみたいです。もう一度お願いします。", block=True)
             continue
 
 
